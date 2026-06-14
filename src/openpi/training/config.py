@@ -912,6 +912,43 @@ _CONFIGS = [
         fsdp_devices=1,
     ),
     TrainConfig(
+        name="pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_tactile_fastvit_0611_h100",
+        model=pi0_tactile_fastvit_config.Pi0TactileFastVitConfig(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            pi05=True,
+            enable_training_time_rtc=True,
+            max_delay=10,
+            tactile_encoder_name="fastvit_t12",
+            # Path to a Flax-format FastViT checkpoint produced by
+            # scripts/convert_fastvit_torch_to_flax.py. Set to None to train the
+            # encoder from scratch.
+            tactile_pretrained_path="model/fastvit_t12_apple_dist_in1k_flax/params.safetensors",
+        ),
+        data=LeRobotBiFlexivTactileDataConfig(
+            repo_id="newbalance_shoe_insole_retrieval_and_packing_0604",
+            use_delta_cartesian_actions=True,
+            default_prompt="Take the shoe out of the shoebox, open the shoe tongue, remove and reinsert the insole, then place the shoe into the shoebox",
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        save_interval=5000,
+        keep_period=10000,
+        ema_decay=None,
+        batch_size=256,
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params",
+            # pi05_base has no tactile branches; allow them to be missing so the
+            # freshly-initialized tactile_encoder (FastViT pretrained) and the
+            # random-init tactile_proj survive the merge.
+            missing_regex=r".*(lora|tactile_encoder|tactile_proj).*",
+        ),
+        num_train_steps=40000,
+        num_workers=64,
+        fsdp_devices=8,
+    ),
+    TrainConfig(
         name="debug_pi05",
         model=pi0_config.Pi0Config(pi05=True, paligemma_variant="dummy", action_expert_variant="dummy"),
         data=FakeDataConfig(),

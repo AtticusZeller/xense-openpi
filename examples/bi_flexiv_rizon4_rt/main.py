@@ -31,12 +31,15 @@ Example usage:
 """
 
 from dataclasses import dataclass
+import pathlib
 import signal
 import sys
 
 from lerobot.teleoperators.bi_pico4 import BiPico4
 from lerobot.teleoperators.bi_pico4.config_bi_pico4 import BiPico4Config
 from lerobot.utils.robot_utils import get_logger
+import numpy as np
+from PIL import Image, ImageDraw
 from typing_extensions import override
 import tyro
 from xense_client import action_chunk_broker
@@ -51,6 +54,13 @@ import examples.bi_flexiv_rizon4_rt.intervention as _intervention
 import examples.bi_flexiv_rizon4_rt.recorder as _recorder
 
 logger = get_logger("BiFlexivRizon4RTMain")
+
+_TACTILE_CAMERA_KEYS = (
+    "left_tactile_top",
+    "left_tactile_bottom",
+    "right_tactile_top",
+    "right_tactile_bottom",
+)
 
 # Action dimension labels for dry-run logging
 _ACTION_LABELS = [
@@ -75,6 +85,45 @@ _ACTION_LABELS = [
     "left_gripper.pos",
     "right_gripper.pos",
 ]
+
+
+def _image_to_uint8_hwc(image: np.ndarray) -> np.ndarray:
+    image = np.asarray(image)
+    if image.ndim == 3 and image.shape[0] == 3 and image.shape[-1] != 3:
+        image = np.moveaxis(image, 0, -1)
+    if image.ndim != 3 or image.shape[-1] != 3:
+        raise ValueError(f"Expected CHW or HWC RGB image, got shape={image.shape}")
+
+    if np.issubdtype(image.dtype, np.integer):
+        return np.clip(image, 0, 255).astype(np.uint8)
+
+    image = image.astype(np.float32)
+    image_min = float(np.nanmin(image))
+    image_max = float(np.nanmax(image))
+    if image_min >= -1.05 and image_max <= 1.05:
+        image = (np.clip(image, -1.0, 1.0) + 1.0) * 127.5
+    elif image_min >= -0.05 and image_max <= 1.05:
+        image = np.clip(image, 0.0, 1.0) * 255.0
+    else:
+        image = np.clip(image, 0.0, 255.0)
+    return image.astype(np.uint8)
+
+
+def _save_tactile_strip(images: dict, output_path: pathlib.Path) -> None:
+    tiles = [_image_to_uint8_hwc(np.asarray(images[key])) for key in _TACTILE_CAMERA_KEYS]
+    strip = np.concatenate(tiles, axis=1)
+
+    label_height = 24
+    canvas = np.zeros((strip.shape[0] + label_height, strip.shape[1], 3), dtype=np.uint8)
+    canvas[label_height:] = strip
+
+    pil_image = Image.fromarray(canvas)
+    draw = ImageDraw.Draw(pil_image)
+    x = 0
+    for key, tile in zip(_TACTILE_CAMERA_KEYS, tiles, strict=True):
+        draw.text((x + 4, 5), key, fill=(255, 255, 255))
+        x += tile.shape[1]
+    pil_image.save(output_path)
 
 
 class DryRunEnvironmentWrapper(_environment.Environment):
@@ -140,6 +189,113 @@ class DryRunEnvironmentWrapper(_environment.Environment):
         self._wrapped_env.disconnect()
 
 
+class TactileFlowAuditEnvironmentWrapper(_environment.Environment):
+    """Audits tactile images at the exact observation boundary sent to policy."""
+
+    def __init__(
+        self,
+        wrapped_env: _environment.Environment,
+        *,
+        audit_steps: int,
+        require_tactile_images: bool,
+        audit_dir: str | None,
+        expected_height: int,
+        expected_width: int,
+    ) -> None:
+        self._wrapped_env = wrapped_env
+        self._audit_steps = audit_steps
+        self._require_tactile_images = require_tactile_images
+        self._audit_dir = pathlib.Path(audit_dir) if audit_dir else None
+        self._expected_shape = (3, expected_height, expected_width)
+        self._episode_audit_count = 0
+        self._total_audit_count = 0
+
+        if self._audit_dir is not None:
+            self._audit_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Tactile flow audit images will be saved to {self._audit_dir}")
+
+    @override
+    def reset(self) -> None:
+        self._wrapped_env.reset()
+        self._episode_audit_count = 0
+
+    @override
+    def is_episode_complete(self) -> bool:
+        return self._wrapped_env.is_episode_complete()
+
+    @override
+    def get_observation(self) -> dict:
+        obs = self._wrapped_env.get_observation()
+        self._audit_observation(obs)
+        return obs
+
+    @override
+    def apply_action(self, action: dict) -> None:
+        self._wrapped_env.apply_action(action)
+
+    def disconnect(self) -> None:
+        self._wrapped_env.disconnect()
+
+    def _audit_observation(self, obs: dict) -> None:
+        if self._audit_steps <= 0 or self._episode_audit_count >= self._audit_steps:
+            return
+
+        self._episode_audit_count += 1
+        self._total_audit_count += 1
+
+        images = obs.get("images", {})
+        missing = [key for key in _TACTILE_CAMERA_KEYS if key not in images]
+        if missing:
+            message = (
+                "Tactile flow audit failed before WebSocket send: "
+                f"missing={missing}, available={tuple(images.keys())}"
+            )
+            if self._require_tactile_images:
+                raise RuntimeError(message)
+            logger.warning(message)
+            return
+
+        failures = []
+        for key in _TACTILE_CAMERA_KEYS:
+            image = np.asarray(images[key])
+            if image.shape != self._expected_shape:
+                failures.append(f"{key}: shape={image.shape}, expected={self._expected_shape}")
+                continue
+
+            if not np.isfinite(image).all():
+                failures.append(f"{key}: contains NaN or Inf")
+                continue
+
+            image_min = float(image.min())
+            image_max = float(image.max())
+            image_mean = float(image.mean())
+            image_std = float(image.std())
+            if image_std <= 1e-6:
+                failures.append(f"{key}: appears constant, std={image_std:.6g}")
+
+            logger.info(
+                "[TACTILE CLIENT] %s shape=%s dtype=%s min=%.3f max=%.3f mean=%.3f std=%.3f",
+                key,
+                image.shape,
+                image.dtype,
+                image_min,
+                image_max,
+                image_mean,
+                image_std,
+            )
+
+        if failures:
+            message = "Tactile flow audit found invalid images: " + "; ".join(failures)
+            if self._require_tactile_images:
+                raise RuntimeError(message)
+            logger.warning(message)
+
+        if self._audit_dir is not None:
+            output_path = self._audit_dir / f"tactile_flow_{self._total_audit_count:04d}.png"
+            _save_tactile_strip(images, output_path)
+            logger.info(f"Saved tactile flow audit image: {output_path}")
+
+
 @dataclass
 class Args:
     """Arguments for BiFlexiv Rizon4 RT inference."""
@@ -157,6 +313,11 @@ class Args:
     interpolate_cmds: bool = True
     enable_tactile_sensors: bool = True
     log_level: str = "DEBUG"
+
+    # Tactile flow audit at the client boundary, before sending observations to the policy server.
+    tactile_flow_audit_steps: int = 3
+    require_tactile_flow: bool = False
+    tactile_flow_audit_dir: str | None = None
 
     # Tactile camera mapping (lerobot camera name -> policy-side name).
     # The four values below correspond to BiFlexivTactileInputs.EXPECTED_CAMERAS;
@@ -242,6 +403,16 @@ def main(args: Args) -> None:
         environment = DryRunEnvironmentWrapper(base_environment)
     else:
         environment = base_environment
+
+    if args.tactile_flow_audit_steps > 0:
+        environment = TactileFlowAuditEnvironmentWrapper(
+            environment,
+            audit_steps=args.tactile_flow_audit_steps,
+            require_tactile_images=args.require_tactile_flow,
+            audit_dir=args.tactile_flow_audit_dir,
+            expected_height=args.render_height,
+            expected_width=args.render_width,
+        )
 
     subscribers = []
     if args.record:
