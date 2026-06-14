@@ -835,30 +835,6 @@ _CONFIGS = [
         fsdp_devices=1,
     ),
     TrainConfig(
-        name="pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0422_merged_fixed_h100",
-        model=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",
-            pi05=True,
-            enable_training_time_rtc=True,
-            max_delay=10,
-        ),
-        data=LeRobotBiFlexivDataConfig(
-            repo_id="Xense/assemble_box_with_phone_stand0410_merged_fixed",
-            use_delta_cartesian_actions=True,
-            default_prompt="Assemble the packaging by folding the flat box into shape, placing the metal phone stand inside, and closing the box properly.",
-            base_config=DataConfig(
-                prompt_from_task=True,
-            ),
-        ),
-        ema_decay=None,
-        batch_size=256,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=80_000,
-        num_workers=64,
-        fsdp_devices=8,
-    ),
-    TrainConfig(
         name="tie_shoes_50_episodes_no_adjust_training_time_rtc_0426_h100",
         model=pi0_config.Pi0Config(
             paligemma_variant="gemma_2b",
@@ -900,33 +876,7 @@ _CONFIGS = [
         fsdp_devices=8,
     ),
     TrainConfig(
-        name="pi05_base_bi_flexiv_earbuds_case_assembly_with_lid_operation_rtc_0429_h100",
-        model=pi0_config.Pi0Config(
-            paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",
-            pi05=True,
-            enable_training_time_rtc=True,
-            max_delay=10,
-        ),
-        data=LeRobotBiFlexivDataConfig(
-            repo_id="Xense/earbuds_case_assembly_with_lid_operation",
-            use_delta_cartesian_actions=True,
-            default_prompt="Pick up each earbud case from the left stands, insert the matching earbuds, close the lid, and place the case on the middle stand",
-            base_config=DataConfig(
-                prompt_from_task=True,  # Set to True for prompt by task_name
-            ),
-        ),
-        save_interval=2000,
-        keep_period=10000,
-        ema_decay=None,
-        batch_size=256,
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        num_train_steps=20000,
-        num_workers=64,
-        fsdp_devices=8,
-    ),
-    TrainConfig(
-        name="pi05_base_bi_flexiv_earbuds_case_assembly_with_lid_operation_rtc_tactile_fastvit_a100",
+        name="pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_0611_debug",
         model=pi0_tactile_fastvit_config.Pi0TactileFastVitConfig(
             paligemma_variant="gemma_2b",
             action_expert_variant="gemma_300m",
@@ -940,27 +890,26 @@ _CONFIGS = [
             tactile_pretrained_path="model/fastvit_t12_apple_dist_in1k_flax/params.safetensors",
         ),
         data=LeRobotBiFlexivTactileDataConfig(
-            repo_id="earbud_case_insertion_teleop_0515",
+            repo_id="Xense/newbalance_shoe_insole_retrieval_and_packing_0604",
             use_delta_cartesian_actions=True,
-            default_prompt="Pick up each earbud case from the left stands, insert the matching earbuds, close the lid, and place the case in the box.",
+            default_prompt="Take the shoe out of the shoebox, open the shoe tongue, remove and reinsert the insole, then place the shoe into the shoebox",
             base_config=DataConfig(
                 prompt_from_task=True,
             ),
         ),
-        save_interval=5000,
-        keep_period=10000,
         ema_decay=None,
-        batch_size=256,
-        weight_loader=weight_loaders.CheckpointWeightLoader(
-            "/home/li/hubo/xense-openpi/model/pi05_base/params",
-            # pi05_base has no tactile branches; allow them to be missing so the
-            # freshly-initialized tactile_encoder (FastViT pretrained) and the
-            # random-init tactile_proj survive the merge.
+        freeze_filter=pi0_tactile_fastvit_config.Pi0TactileFastVitConfig(
+              pi05=True,
+              paligemma_variant="gemma_2b_lora",
+              action_expert_variant="gemma_300m_lora",
+          ).get_freeze_filter(),
+        batch_size=2,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params",
             missing_regex=r".*(lora|tactile_encoder|tactile_proj).*",
         ),
-        num_train_steps=40000,
-        num_workers=64,
-        fsdp_devices=8,
+        num_train_steps=60_000,
+        num_workers=2,
+        fsdp_devices=1,
     ),
     TrainConfig(
         name="debug_pi05",
