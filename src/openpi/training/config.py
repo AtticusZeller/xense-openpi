@@ -878,8 +878,8 @@ _CONFIGS = [
     TrainConfig(
         name="pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_0611_debug",
         model=pi0_tactile_fastvit_config.Pi0TactileFastVitConfig(
-            paligemma_variant="gemma_2b",
-            action_expert_variant="gemma_300m",
+            paligemma_variant="gemma_2b_lora",
+            action_expert_variant="gemma_300m_lora",
             pi05=True,
             enable_training_time_rtc=True,
             max_delay=10,
@@ -890,7 +890,7 @@ _CONFIGS = [
             tactile_pretrained_path="model/fastvit_t12_apple_dist_in1k_flax/params.safetensors",
         ),
         data=LeRobotBiFlexivTactileDataConfig(
-            repo_id="Xense/newbalance_shoe_insole_retrieval_and_packing_0604",
+            repo_id="Xense/newbalance_shoe_insole_retrieval_and_packing_0611",
             use_delta_cartesian_actions=True,
             default_prompt="Take the shoe out of the shoebox, open the shoe tongue, remove and reinsert the insole, then place the shoe into the shoebox",
             base_config=DataConfig(
@@ -926,7 +926,7 @@ _CONFIGS = [
             tactile_pretrained_path="model/fastvit_t12_apple_dist_in1k_flax/params.safetensors",
         ),
         data=LeRobotBiFlexivTactileDataConfig(
-            repo_id="newbalance_shoe_insole_retrieval_and_packing_0604",
+            repo_id="Xense/newbalance_shoe_insole_retrieval_and_packing_0611",
             use_delta_cartesian_actions=True,
             default_prompt="Take the shoe out of the shoebox, open the shoe tongue, remove and reinsert the insole, then place the shoe into the shoebox",
             base_config=DataConfig(
