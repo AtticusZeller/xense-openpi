@@ -407,6 +407,7 @@ def main(config: _config.TrainConfig):
     logging.info(f"[TIMING] per-step timing → {timing_log_path}")
 
     infos = []
+    # --- stall diagnostics: warn when any phase exceeds this ---
     STALL_THRESHOLD_S = 3.0
     for step in pbar:
         t_loop_start = time.monotonic()

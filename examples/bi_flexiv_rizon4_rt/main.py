@@ -25,15 +25,22 @@ Example usage:
         --record_repo_id Xense/my_new_dataset \\
         --task "pack 6 cosmetic bottles into the carton"
 
+    # Inference + stream head camera & state to the video-playback laptop at 10 Hz
+    # (off-laptop detection + seamless video switching; never blocks control)
+    python -m examples.bi_flexiv_rizon4_rt.main \\
+        --host 192.168.2.100 --port 8000 \\
+        --subscribe --subscribe_url ws://192.168.2.50:9100 --subscribe_hz 10
+
     # Inference with Pico4 human intervention (both grips held → teleop takes over)
     python -m examples.bi_flexiv_rizon4_rt.main \\
         --host 192.168.2.100 --port 8000 --pico4_intervention
 """
 
 from dataclasses import dataclass
+import os
 import pathlib
 import signal
-import sys
+import threading
 
 from lerobot.teleoperators.bi_pico4 import BiPico4
 from lerobot.teleoperators.bi_pico4.config_bi_pico4 import BiPico4Config
@@ -43,8 +50,10 @@ from PIL import Image, ImageDraw
 from typing_extensions import override
 import tyro
 from xense_client import action_chunk_broker
+from xense_client import paced_broker as _paced_broker
 from xense_client import rtc_action_chunk_broker
 from xense_client import websocket_client_policy as _websocket_client_policy
+from xense_client.runtime import decoupled_runtime as _decoupled_runtime
 from xense_client.runtime import environment as _environment
 from xense_client.runtime import runtime as _runtime
 from xense_client.runtime.agents import policy_agent as _policy_agent
@@ -52,6 +61,7 @@ from xense_client.runtime.agents import policy_agent as _policy_agent
 import examples.bi_flexiv_rizon4_rt.env as _env
 import examples.bi_flexiv_rizon4_rt.intervention as _intervention
 import examples.bi_flexiv_rizon4_rt.recorder as _recorder
+import examples.bi_flexiv_rizon4_rt.subscribe as _subscribe
 
 logger = get_logger("BiFlexivRizon4RTMain")
 
@@ -349,6 +359,38 @@ class Args:
     blend_steps: int = 0
     default_delay: int = 4
 
+    # Decoupled mode: action thread emits at action_hz independently of the
+    # obs loop (which is pinned to camera FPS). 0 = disabled (legacy single-
+    # threaded Runtime). When enabled, RTC's frequency_hz tracks action_hz
+    # so its delay estimation stays consistent with reality.
+    action_hz: float = 0.0
+    paced_queue_size: int = 50
+
+    # Enable the obs subscriber that streams observations to the downstream
+    # video-playback laptop (③) for off-laptop detection + seamless video switching.
+    # One-way ws push on a daemon thread; never blocks the 30 Hz control loop.
+    # (Inference is on the separate 5090 server, set via --host/--port.)
+    # NB: distinct from --bi_mount_type forward — this is the detection-data stream.
+    subscribe: bool = False
+    # obs ws URL of the video-playback laptop's app (its --obs_port, default 9100).
+    subscribe_url: str = "ws://127.0.0.1:9100"
+    # Which raw cameras to stream from observation["images_raw"]; the detector uses head.
+    subscribe_cameras: tuple[str, ...] = ("head",)
+    # Stream the 20-D robot state — the gripper detector needs it.
+    subscribe_state: bool = True
+    # Also stream the 20-D model action (debug/overlay only; the detector ignores it).
+    subscribe_action: bool = False
+    # Cap the stream rate to this many frames/sec (wall-clock throttle, independent of
+    # runtime_hz). 0 = stream on every control step. e.g. 10 = stream the head at 10 Hz.
+    subscribe_hz: float = 0.0
+    # Stream every Nth step (integer subsample); prefer subscribe_hz to target a rate.
+    subscribe_stride: int = 1
+    # Startup handshake: when --subscribe is set, block until the video-playback laptop
+    # is reachable before running (like the VLA client waits for the inference server),
+    # so we never run inference with the screen unreachable. Give up after this many
+    # seconds; 0 = wait forever (retry), matching the VLA client.
+    subscribe_handshake_timeout: float = 0.0
+
     # Recording (LeRobot format, raw 640x480 images + absolute actions)
     record: bool = False
     record_repo_id: str = "Xense/recorded_dataset"
@@ -370,6 +412,16 @@ def main(args: Args) -> None:
         raise SystemExit(
             "--pico4_intervention is not supported with --rtc_enabled in this release. "
             "Run without --rtc_enabled, or disable intervention."
+        )
+
+    decoupled_mode = args.action_hz > 0
+    if decoupled_mode and args.pico4_intervention:
+        # DecoupledRuntime spawns an action thread that pops from a queue the
+        # producer keeps filling. Switching control to teleop mid-stream would
+        # require draining the queue race-free across three threads — defer.
+        raise SystemExit(
+            "--pico4_intervention is not supported with --action_hz > 0 in this release. "
+            "Run with --action_hz 0 (synchronous runtime) when intervention is needed."
         )
 
     ws_client_policy = _websocket_client_policy.WebsocketClientPolicy(
@@ -429,10 +481,32 @@ def main(args: Args) -> None:
         subscribers.append(recorder)
         logger.info(f"Recording enabled: repo_id={args.record_repo_id}, task='{args.task}'")
 
+    if args.subscribe:
+        # require_handshake blocks here until the video-playback laptop is up and
+        # greets us — so, like the VLA policy client waiting for the inference server,
+        # we never proceed to inference while the screen PC is unreachable.
+        obs_subscriber = _subscribe.make_obs_subscriber(
+            uri=args.subscribe_url,
+            cameras=tuple(args.subscribe_cameras),
+            send_state=args.subscribe_state,
+            send_action=args.subscribe_action,
+            subscribe_hz=args.subscribe_hz,
+            send_stride=args.subscribe_stride,
+            require_handshake=True,
+            handshake_timeout_s=args.subscribe_handshake_timeout,
+        )
+        subscribers.append(obs_subscriber)
+        logger.info(f"Subscribing obs to detection machine: {args.subscribe_url}")
+
+    # In decoupled mode the broker is popped at action_hz, not runtime_hz —
+    # RTC's internal delay/blend math reads frequency_hz to estimate
+    # per-step elapsed time, so it must match the actual pop rate.
+    effective_broker_hz = args.action_hz if decoupled_mode else args.runtime_hz
+
     if args.rtc_enabled:
         policy = rtc_action_chunk_broker.RTCActionChunkBroker(
             policy=ws_client_policy,
-            frequency_hz=args.runtime_hz,
+            frequency_hz=effective_broker_hz,
             action_queue_size_to_get_new_actions=args.action_queue_size_to_get_new_actions,
             rtc_enabled=args.rtc_enabled,
             execution_horizon=args.execution_horizon,
@@ -454,6 +528,23 @@ def main(args: Args) -> None:
             action_horizon=args.action_horizon,
         )
 
+    if decoupled_mode:
+        # Wrap whichever broker we just built; the PacedBroker presents the
+        # same BasePolicy contract to anything else but adds submit_obs /
+        # pop_action / start / stop for DecoupledRuntime.
+        #
+        # target_hz=action_hz throttles the producer to the consumer rate.
+        # Without it, the producer drains an internal broker queue (RTC has
+        # one) faster than its background inference can refill, generating
+        # "Action queue exhausted" warning spam during startup. For non-RTC
+        # the queue.put back-pressure already paces things, but matching the
+        # consumer rate is still the right default.
+        policy = _paced_broker.PacedBroker(
+            inner=policy,
+            queue_size=args.paced_queue_size,
+            target_hz=args.action_hz,
+        )
+
     intervention_controller: _intervention.Pico4InterventionController | None = None
     if args.pico4_intervention:
         teleop = BiPico4(
@@ -473,14 +564,28 @@ def main(args: Args) -> None:
     else:
         agent = _policy_agent.PolicyAgent(policy=policy)
 
-    runtime = _runtime.Runtime(
-        environment=environment,
-        agent=agent,
-        subscribers=subscribers,
-        max_hz=args.runtime_hz,
-        num_episodes=args.num_episodes,
-        max_episode_steps=args.max_episode_steps,
-    )
+    if decoupled_mode:
+        logger.info(
+            f"Decoupled runtime: obs at ~{args.runtime_hz} Hz (camera-bound), " f"action at {args.action_hz} Hz"
+        )
+        runtime = _decoupled_runtime.DecoupledRuntime(
+            environment=environment,
+            broker=policy,  # PacedBroker
+            subscribers=subscribers,
+            obs_hz=args.runtime_hz,
+            action_hz=args.action_hz,
+            num_episodes=args.num_episodes,
+            max_episode_steps=args.max_episode_steps,
+        )
+    else:
+        runtime = _runtime.Runtime(
+            environment=environment,
+            agent=agent,
+            subscribers=subscribers,
+            max_hz=args.runtime_hz,
+            num_episodes=args.num_episodes,
+            max_episode_steps=args.max_episode_steps,
+        )
 
     def safe_disconnect() -> None:
         try:
@@ -498,10 +603,21 @@ def main(args: Args) -> None:
         except Exception as e:
             logger.warning(f"Error disconnecting: {e}")
 
+    # SIGINT handling: first press asks the runtime to wind down threads
+    # cleanly (DecoupledRuntime joins its action + obs threads here, ~0.5 s);
+    # main's `finally` then runs safe_disconnect, which homes the arms via
+    # MoveJ before releasing the SDK — same end-state as the original
+    # synchronous runtime. A second Ctrl+C while shutdown is in progress
+    # escapes to os._exit, accepting that the arms may not return home.
+    _shutdown_in_progress = threading.Event()
+
     def signal_handler(sig, frame):
-        logger.info("Ctrl+C detected, disconnecting...")
-        safe_disconnect()
-        sys.exit(0)
+        if _shutdown_in_progress.is_set():
+            logger.warning("Second Ctrl+C — forcing exit. Arms may not return home cleanly.")
+            os._exit(1)
+        _shutdown_in_progress.set()
+        logger.info("Ctrl+C — stopping runtime gracefully " "(press Ctrl+C again to force exit)")
+        runtime.request_stop()
 
     signal.signal(signal.SIGINT, signal_handler)
 

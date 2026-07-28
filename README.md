@@ -46,22 +46,23 @@ For all models, we provide _base model_ checkpoints, pre-trained on 10k+ hours o
 
 ## Installation
 
-We use the `lerobot-xense` mamba environment as the base, then install the client package followed by the main openpi package.
+We build on the `lerobot-xense` mamba environment, then install the client package followed by the main openpi package.
 
 ```bash
 # Clone with submodules
-git clone git@github.com:Vertax42/openpi.git
+git clone git@github.com:Vertax42/xense-openpi.git openpi
+cd openpi
 
 # Activate the base environment
 mamba activate lerobot-xense
 
 # 1. Install the client package (xense-client, used by robot runtimes)
 cd packages/xense-client
-GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+GIT_LFS_SKIP_SMUDGE=1 pip install -e .
 
 # 2. Install the main openpi package
 cd ../..
-GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .
+GIT_LFS_SKIP_SMUDGE=1 pip install -e .
 ```
 
 ## Model Checkpoints
@@ -135,22 +136,116 @@ For training, we use the LeRobot dataset format. You can convert your own data t
 
 ### 2. Defining training configs and running training
 
-To fine-tune a base model on your own data, you need to define configs for data processing and training. We provide example configs with detailed comments for DROID and Xense platforms in [`config.py`](src/openpi/training/config.py), which you can modify for your own dataset:
+A training config can be defined in **two ways**, both resolved by name through `get_config(name)`:
+
+1. **YAML (preferred for new tasks)** — one file per task in `configs/`. Per-user
+   configs in `configs/<name>.yaml` are gitignored; shared templates live in
+   `configs/_examples/<name>.yaml`. See [`configs/README.md`](configs/README.md) for
+   the schema and [`docs/yaml_config_changelog.md`](docs/yaml_config_changelog.md)
+   for design notes.
+2. **Python `_CONFIGS` list in [`config.py`](src/openpi/training/config.py)** —
+   used by legacy entries that can't round-trip through YAML (`pi0_droid`, LoRA
+   configs with `flax.nnx` freeze filters, etc.). New tasks should prefer YAML to
+   avoid merge conflicts in this central file.
+
+Lookup order: `configs/<name>.yaml` → `configs/_examples/<name>.yaml` → `_CONFIGS_DICT[name]`. First match wins.
+
+Shared building blocks (used by both modes):
 
 - Data transforms: Define the data mapping from your environment to the model (see [`droid_policy.py`](src/openpi/policies/droid_policy.py) or [`xense_flare_policy.py`](src/openpi/policies/xense_flare_policy.py) for examples)
 - `DataConfig`: Defines how to process raw data from LeRobot dataset for training
 - `TrainConfig`: Defines fine-tuning hyperparameters, data config, and weight loader
 
+#### Defining a new training config in YAML
+
+Copy the closest example from `configs/_examples/` and edit it. For a personal
+in-flight experiment, put the new file directly under `configs/` (it will be
+gitignored). For something you want to share with the team, put it under
+`configs/_examples/` and open a PR.
+
+**Reference:** [`configs/_examples/_FULL_REFERENCE.yaml`](configs/_examples/_FULL_REFERENCE.yaml)
+lists every `TrainConfig` field, every registered class for each polymorphic
+slot (`model.type`, `data.type`, `weight_loader.type`, etc.), and the current
+default for each value. Open it alongside your real config when you need to
+look up "what does field X do" or "what else can I put in `data.type`".
+
+**LoRA fine-tuning:** set `model.paligemma_variant` and/or
+`model.action_expert_variant` to a `*_lora` value (e.g. `gemma_2b_lora`,
+`gemma_300m_lora`). The YAML loader detects the `lora` substring and
+auto-derives the correct `freeze_filter` from
+`Pi0Config.get_freeze_filter()` — you don't need to (and can't) write a
+flax filter tree in YAML. See
+[`pi05_base_bi_flexiv_pack_6_cosmetic_bottles_lora.yaml`](configs/_examples/pi05_base_bi_flexiv_pack_6_cosmetic_bottles_lora.yaml)
+for a complete LoRA example.
+
+```yaml
+# configs/my_task.yaml  (filename stem = config name; do not put `name:` inside)
+
+model:
+  type: Pi0Config # registered in src/openpi/training/registry.py
+  pi05: true
+  paligemma_variant: gemma_2b
+  action_expert_variant: gemma_300m
+  enable_training_time_rtc: true
+  max_delay: 10
+
+data:
+  type: LeRobotBiFlexivDataConfig
+  repo_id: Xense/<your_dataset>
+  use_delta_cartesian_actions: true
+  default_prompt: "Describe the task here."
+  base_config:
+    prompt_from_task: true
+
+weight_loader:
+  type: CheckpointWeightLoader
+  params_path: gs://openpi-assets/checkpoints/pi05_base/params
+
+batch_size: 256
+num_train_steps: 40000
+num_workers: 64
+fsdp_devices: 8
+```
+
+Then use it exactly like any other config:
+
+```bash
+python scripts/compute_norm_stats.py --config-name my_task
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py my_task --exp-name=run_0520 --overwrite
+python scripts/serve_policy.py policy:checkpoint --policy.config=my_task --policy.dir=checkpoints/my_task/run_0520/<step>
+```
+
+⚠️ Before committing a YAML into `configs/_examples/`, scrub any machine-local
+absolute paths from `weight_loader.params_path` (e.g. `/home/<you>/...`). Use
+upstream URLs (`gs://openpi-assets/...`) or paths that every contributor can
+resolve.
+
+If you need to add a brand-new model class or data factory, register its string
+name in [`src/openpi/training/registry.py`](src/openpi/training/registry.py)
+first — then any YAML can reference it via `type: <YourClass>`.
+
+#### Updating shared examples after editing `config.py`
+
+If you changed something in `_CONFIGS` that has a corresponding YAML in
+`configs/_examples/`, regenerate the YAMLs and re-run the equivalence test:
+
+```bash
+python scripts/migrate_configs_to_yaml.py --overwrite
+pytest src/openpi/training/yaml_examples_equivalence_test.py
+```
+
+#### Running training
+
 Before we can run training, we need to compute the normalization statistics for the training data. Run the script below with the name of your training config (e.g., for Xense):
 
 ```bash
-uv run scripts/compute_norm_stats.py --config-name pi05_base_arx5_lora
+python scripts/compute_norm_stats.py --config-name pi05_base_arx5_lora
 ```
 
 Now we can kick off training with the following command (the `--overwrite` flag is used to overwrite existing checkpoints if you rerun fine-tuning with the same config):
 
 ```bash
-XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 uv run scripts/train.py pi05_base_arx5_lora --exp-name=my_experiment --overwrite
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py pi05_base_arx5_lora --exp-name=my_experiment --overwrite
 ```
 
 The command will log training progress to the console and save checkpoints to the `checkpoints` directory. You can also monitor training progress on the Weights & Biases dashboard. For maximally using the GPU memory, set `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9` before running training -- this enables JAX to use up to 90% of the GPU memory (vs. the default of 75%).
@@ -190,24 +285,14 @@ openpi now provides PyTorch implementations of π₀ and π₀.₅ models alongs
 
 ### Setup
 
-1. Make sure transformers 4.53.2 is installed: `pip show transformers`
-
-2. Apply the transformers library patches (adjust the site-packages path for your Python version):
-   ```bash
-   # Find your site-packages path
-   python -c "import transformers; print(transformers.__file__)"
-   # Copy patches
-   cp -r ./src/openpi/models_pytorch/transformers_replace/* $(python -c "import transformers, os; print(os.path.dirname(transformers.__file__))")/
-   ```
-
-This overwrites several files in the transformers library with necessary model changes: 1) supporting AdaRMS, 2) correctly controlling the precision of activations, and 3) allowing the KV cache to be used without being updated.
+`pip install -e .` is sufficient. The PyTorch path uses `transformers>=5.5,<5.6`; Pi0-specific behavior (AdaRMS, activation precision, read-only KV cache) lives in `src/openpi/models_pytorch/transformers_compat/` and is imported directly by `gemma_pytorch.py`. The old `transformers_replace/` copy-into-site-packages workflow has been removed.
 
 ### Converting JAX Models to PyTorch
 
 To convert a JAX model checkpoint to PyTorch format:
 
 ```bash
-uv run examples/convert_jax_model_to_pytorch.py \
+python examples/convert_jax_model_to_pytorch.py \
     --checkpoint_dir /path/to/jax/checkpoint \
     --config_name <config name> \
     --output_path /path/to/converted/pytorch/checkpoint
@@ -237,7 +322,7 @@ action_chunk = policy.infer(example)["actions"]
 The policy server works identically with PyTorch models - just point to the converted checkpoint directory:
 
 ```bash
-uv run scripts/serve_policy.py policy:checkpoint \
+python scripts/serve_policy.py policy:checkpoint \
     --policy.config=pi05_droid \
     --policy.dir=/path/to/converted/pytorch/checkpoint
 ```
@@ -249,7 +334,7 @@ To finetune a model in PyTorch:
 1. Convert the JAX base model to PyTorch format:
 
    ```bash
-   uv run examples/convert_jax_model_to_pytorch.py \
+   python examples/convert_jax_model_to_pytorch.py \
        --config_name <config name> \
        --checkpoint_dir /path/to/jax/base/model \
        --output_path /path/to/pytorch/base/model
@@ -261,21 +346,21 @@ To finetune a model in PyTorch:
 
 ```bash
 # Single GPU training:
-uv run scripts/train_pytorch.py <config_name> --exp_name <run_name> --save_interval <interval>
+python scripts/train_pytorch.py <config_name> --exp_name <run_name> --save_interval <interval>
 
 # Example:
-uv run scripts/train_pytorch.py debug --exp_name pytorch_test
-uv run scripts/train_pytorch.py debug --exp_name pytorch_test --resume  # Resume from latest checkpoint
+python scripts/train_pytorch.py debug --exp_name pytorch_test
+python scripts/train_pytorch.py debug --exp_name pytorch_test --resume  # Resume from latest checkpoint
 
 # Multi-GPU training (single node):
-uv run torchrun --standalone --nnodes=1 --nproc_per_node=<num_gpus> scripts/train_pytorch.py <config_name> --exp_name <run_name>
+torchrun --standalone --nnodes=1 --nproc_per_node=<num_gpus> scripts/train_pytorch.py <config_name> --exp_name <run_name>
 
 # Example using debug config:
-uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py debug --exp_name pytorch_ddp_test
-uv run torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py debug --exp_name pytorch_ddp_test --resume
+torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py debug --exp_name pytorch_ddp_test
+torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/train_pytorch.py debug --exp_name pytorch_ddp_test --resume
 
 # Multi-Node Training:
-uv run torchrun \
+torchrun \
     --nnodes=<num_nodes> \
     --nproc_per_node=<gpus_per_node> \
     --node_rank=<rank_of_node> \
@@ -306,13 +391,13 @@ We will collect common issues and their solutions here. If you encounter an issu
 
 | Issue                                  | Resolution                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Dependency conflicts                   | Make sure you are in the `lerobot-xense` mamba environment, then run `GIT_LFS_SKIP_SMUDGE=1 uv pip install -e .` to install openpi.                                                                                                                                                                                                                                                                                                                                                                                 |
+| Dependency conflicts                   | Make sure you are in the `lerobot-xense` mamba environment, then run `GIT_LFS_SKIP_SMUDGE=1 pip install -e .` to install openpi.                                                                                                                                                                                                                                                                                                                                                                                    |
 | Training runs out of GPU memory        | Make sure you set `XLA_PYTHON_CLIENT_MEM_FRACTION=0.9` (or higher) before running training to allow JAX to use more GPU memory. You can also use `--fsdp-devices <n>` where `<n>` is your number of GPUs, to enable [fully-sharded data parallelism](https://engineering.fb.com/2021/07/15/open-source/fsdp/), which reduces memory usage in exchange for slower training (the amount of slowdown depends on your particular setup). If you are still running out of memory, you may way to consider disabling EMA. |
 | Policy server connection errors        | Check that the server is running and listening on the expected port. Verify network connectivity and firewall settings between client and server.                                                                                                                                                                                                                                                                                                                                                                   |
 | Missing norm stats error when training | Run `scripts/compute_norm_stats.py` with your config name before starting training.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | Dataset download fails                 | Check your internet connection. For HuggingFace datasets, ensure you're logged in (`huggingface-cli login`).                                                                                                                                                                                                                                                                                                                                                                                                        |
-| CUDA/GPU errors                        | Verify NVIDIA drivers are installed correctly. For Docker, ensure nvidia-container-toolkit is installed. Check GPU compatibility. You do NOT need CUDA libraries installed at a system level --- they will be installed via uv. You may even want to try _uninstalling_ system CUDA libraries if you run into CUDA issues, since system libraries can sometimes cause conflicts.                                                                                                                                    |
-| Import errors when running examples    | Make sure you've installed all dependencies with `uv sync`. Some examples may have additional requirements listed in their READMEs.                                                                                                                                                                                                                                                                                                                                                                                 |
+| CUDA/GPU errors                        | Verify NVIDIA drivers are installed correctly. For Docker, ensure nvidia-container-toolkit is installed. Check GPU compatibility. You do NOT need CUDA libraries installed at a system level --- they will be installed via pip as part of openpi's dependencies. You may even want to try _uninstalling_ system CUDA libraries if you run into CUDA issues, since system libraries can sometimes cause conflicts.                                                                                                  |
+| Import errors when running examples    | Make sure you've installed all dependencies with `pip install -e .`. Some examples may have additional requirements listed in their READMEs.                                                                                                                                                                                                                                                                                                                                                                        |
 | Action dimensions mismatch             | Verify your data processing transforms match the expected input/output dimensions of your robot. Check the action space definitions in your policy classes.                                                                                                                                                                                                                                                                                                                                                         |
 | Diverging training loss                | Check the `q01`, `q99`, and `std` values in `norm_stats.json` for your dataset. Certain dimensions that are rarely used can end up with very small `q01`, `q99`, or `std` values, leading to huge states and actions after normalization. You can manually adjust the norm stats as a workaround.                                                                                                                                                                                                                   |
 
@@ -369,15 +454,56 @@ python scripts/compute_norm_stats.py --config-name pi05_base_bi_flexiv_assemble_
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
     pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100 \
     --exp-name=pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100_0430 --overwrite
+
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
+    pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100 \
+    --exp-name=pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100_0510 --overwrite
 ```
 
-#### BiFlexiv — earbuds case assembly with lid operation
+#### BiFlexiv — earbuds case sequential insertion task
 
 ```bash
-python scripts/compute_norm_stats.py --config-name pi05_base_bi_flexiv_earbuds_case_assembly_with_lid_operation_rtc_0429_h100
+python scripts/compute_norm_stats.py --config-name pi05_base_bi_flexiv_earbuds_case_sequential_insertion_teleop_rtc_0513_h100
 XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
-    pi05_base_bi_flexiv_earbuds_case_assembly_with_lid_operation_rtc_0429_h100 \
-    --exp-name=pi05_base_bi_flexiv_earbuds_case_assembly_with_lid_operation_rtc_0429_h100_0429 --overwrite
+    pi05_base_bi_flexiv_earbuds_case_sequential_insertion_teleop_rtc_0513_h100 \
+    --exp-name=pi05_base_bi_flexiv_earbuds_case_sequential_insertion_teleop_rtc_0513_h100_0513 --overwrite
+```
+
+#### BiFlexiv - shoe_insole_retrieval_and_packing_0
+
+```bash
+python scripts/compute_norm_stats.py --config-name pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
+    pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100 \
+    --exp-name=pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100_0516 --overwrite
+
+python scripts/compute_norm_stats.py --config-name pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
+    pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100 \
+    --exp-name=pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100_0519 --overwrite
+
+python scripts/compute_norm_stats.py --config-name pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0607_h100
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
+    pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0607_h100 \
+    --exp-name=pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0607_h100_0607 --overwrite
+```
+
+#### BiFlexiv - shoe_insole_retrieval_and_packing_1
+
+```bash
+python scripts/compute_norm_stats.py --config-name pi05_base_bi_flexiv_newbalacne_shoe_insole_retrieval_and_packing_0616_h100
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
+    pi05_base_bi_flexiv_newbalacne_shoe_insole_retrieval_and_packing_0616_h100 \
+    --exp-name=pi05_base_bi_flexiv_newbalacne_shoe_insole_retrieval_and_packing_0616_h100_0626 --overwrite
+```
+
+#### BiFlexiv - bag_inspection_0611
+
+```bash
+python scripts/compute_norm_stats.py --config-name pi05_base_bi_flexiv_bag_inspection_0611_h100
+XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 python scripts/train.py \
+    pi05_base_bi_flexiv_bag_inspection_0611_h100 \
+    --exp-name=pi05_base_bi_flexiv_bag_inspection_0611_h100_0625 --overwrite
 ```
 
 ### Deployment Commands (latest per platform)
@@ -422,15 +548,60 @@ python scripts/serve_policy.py \
     policy:checkpoint \
     --policy.config=pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100 \
     --policy.dir=checkpoints/pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100/pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100_0430/79999
+
+python scripts/serve_policy.py \
+    --default-prompt="assemble the box with the phone stand" \
+    policy:checkpoint \
+    --policy.config=pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100 \
+    --policy.dir=checkpoints/pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100/pi05_base_bi_flexiv_assemble_box_with_phone_stand_lora_0430_merged_fixed_h100_0510/66000
 ```
 
 #### BiFlexiv — earbuds case assembly with lid operation inference
+
 ```bash
 python scripts/serve_policy.py \
     --default-prompt="Pick up the earbuds from the acrylic plate, open the charging case, precisely align and gently insert the earbuds using contact feedback, then close the lid securely" \
     policy:checkpoint \
-    --policy.config=pi05_base_bi_flexiv_earbuds_case_assembly_with_lid_operation_rtc_0429_h100 \
-    --policy.dir=checkpoints/pi05_base_bi_flexiv_earbuds_case_assembly_with_lid_operation_rtc_0429_h100/pi05_base_bi_flexiv_earbuds_case_assembly_with_lid_operation_rtc_0429_h100_0429/38000
+    --policy.config=pi05_base_bi_flexiv_earbuds_case_sequential_insertion_teleop_rtc_0513_h100 \
+    --policy.dir=checkpoints/pi05_base_bi_flexiv_earbuds_case_sequential_insertion_teleop_rtc_0513_h100/pi05_base_bi_flexiv_earbuds_case_sequential_insertion_teleop_rtc_0513_h100_0513/19999
+```
+
+#### BiFlexiv - shoe_insole_retrieval_and_packing_0 inference
+
+```bash
+python scripts/serve_policy.py \
+    --default-prompt="retrieve the shoe insole from the box and pack it into the shoe" \
+    policy:checkpoint \
+    --policy.config=pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100 \
+    --policy.dir=checkpoints/pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100/pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100_0519/39999
+```
+
+```bash
+python scripts/serve_policy.py \
+    --default-prompt="retrieve the shoe insole from the box and pack it into the shoe" \
+    policy:checkpoint \
+    --policy.config=pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100 \
+    --policy.dir=checkpoints/pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100/pi05_base_bi_flexiv_shoe_insole_retrieval_and_packing_0515_h100_0520/39999
+```
+
+#### BiFlexiv - newbalance_shoe_insole_retrieval_and_packing_0606 inference
+
+```bash
+python scripts/serve_policy.py \
+    --default-prompt="Take the shoe out of the shoebox, open the shoe tongue, remove and reinsert the insole, then place the shoe into the shoebox." \
+    policy:checkpoint \
+    --policy.config=pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_0616_h100 \
+    --policy.dir=checkpoints/pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_0616_h100/pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_0616_h100_0701/77000
+```
+
+#### BiFlexiv - bag_inspection_0611 inference
+
+```bash
+python scripts/serve_policy.py \
+    --default-prompt="Pick up the bag, open it, inspect its contents, close it, and place it on the opposite side." \
+    policy:checkpoint \
+    --policy.config=pi05_base_bi_flexiv_bag_inspection_0611_h100 \
+    --policy.dir=checkpoints/pi05_base_bi_flexiv_bag_inspection_0611_h100/pi05_base_bi_flexiv_bag_inspection_0611_h100_0611/59999
 ```
 
 ### Running the robot client
@@ -453,17 +624,64 @@ python -m examples.bi_flexiv_rizon4_rt.main \
     --args.runtime-hz 30 \
     --args.rtc-enabled \
     --args.dry-run
+```
 
-# BiFlexiv RT forward mount with RTC enabled
+### BiFlexiv RT forward mount + dewu video switch — full 3-machine demo
+
+The shoe-insole packing demo runs across three machines: the **inference server**
+(RTX 5090 GPU, runs the VLA), the **screen PC** (video-playback laptop — detection
+
+- seamless scene-video switching + browser display), and the **robot host**
+  (Flexiv Rizon4 ×2 control loop, which forwards the head camera + state to the
+  screen PC). Start them in this order; see
+  [`examples/dewu_video_switch/README.md`](examples/dewu_video_switch/README.md)
+  for the full architecture.
+
+**① Inference server — run on the server side**
+
+```bash
+python scripts/serve_policy.py \
+    --default-prompt="Take the shoe out of the shoebox, open the shoe tongue, remove and reinsert the insole, then place the shoe into the shoebox." \
+    policy:checkpoint \
+    --policy.config=pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_0616_h100 \
+    --policy.dir=checkpoints/pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_0616_h100/pi05_base_bi_flexiv_newbalance_shoe_insole_retrieval_and_packing_0616_h100_0701/77000
+```
+
+**② Screen PC (video-playback laptop) — run on the screen pc side**
+
+```bash
+# Detection + seamless video player + switch ws
+# (serves web/ on :8080, switch ws :9101, obs ws :9100)
+python -m examples.dewu_video_switch.app \
+    --detector shoe_sm \
+    --detector-config examples/dewu_video_switch/shoe_sm.json \
+    --save-blue-frames
+
+# then open the display in a browser:  http://<screen-pc-ip>:8080
+```
+
+**③ Robot host — run on the robot side**
+
+```bash
+# --args.subscribe / --args.subscribe-url wire the robot's head camera + state to
+# the screen PC (②) so the on-screen scene video switches with the real inspection.
+# (Note: --args.subscribe is the detection-data stream — unrelated to the
+# --args.bi-mount-type forward-05 arm-mount option below.)
+# --args.subscribe BLOCKS at startup until ② is reachable (handshake, like the
+# VLA client waits for the inference server), so start ② before this. Add
+# --args.subscribe-handshake-timeout <s> to abort instead of waiting forever.
 python -m examples.bi_flexiv_rizon4_rt.main \
-    --args.host 192.168.142.220 \
-    --args.port 8000 \
-    --args.bi-mount-type forward \
-    --args.inner-control-hz 1000 \
-    --args.interpolate-cmds \
-    --args.runtime-hz 30 \
-    --args.rtc-enabled \
-    --args.dry-run
+ --args.host 192.168.5.87 \
+ --args.port 8000 \
+ --args.bi-mount-type forward-05 \
+ --args.inner-control-hz 1000 \
+ --args.interpolate-cmds \
+ --args.runtime-hz 30 \
+ --args.rtc-enabled \
+ --args.subscribe \
+ --args.subscribe-url ws://<screen-pc-ip>:9100 \
+ --args.subscribe-hz 10 \
+ --args.dry-run
 ```
 
 ---

@@ -9,9 +9,9 @@ import flax.traverse_util
 import jax
 import jax.numpy as jnp
 import numpy as np
-from xense_client import base_policy as _base_policy
 import torch
 from typing_extensions import override
+from xense_client import base_policy as _base_policy
 
 from openpi import transforms as _transforms
 from openpi.models import model as _model
@@ -59,7 +59,15 @@ class Policy(BasePolicy):
         if self._is_pytorch_model:
             self._model = self._model.to(pytorch_device)
             self._model.eval()
-            self._sample_actions = model.sample_actions
+            # Mirror the JAX path: prefer the RTC sampler when the model was
+            # trained with ``enable_training_time_rtc=True``.
+            if getattr(model, "_enable_training_time_rtc", False) and hasattr(
+                model, "training_time_rtc_sample_actions"
+            ):
+                logging.info("Using training_time_rtc_sample_actions for PyTorch inference")
+                self._sample_actions = model.training_time_rtc_sample_actions
+            else:
+                self._sample_actions = model.sample_actions
         else:
             # JAX model setup - choose sample method based on training_time_rtc config
             if getattr(model, "_enable_training_time_rtc", False) and hasattr(
