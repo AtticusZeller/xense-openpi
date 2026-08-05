@@ -1,6 +1,15 @@
 #!/usr/bin/env python
 """Run a UMI-trained OpenPI checkpoint on a BiFlexiv Rizon4 RT robot.
 
+Pipeline overview (everything client-side stays in native BiFlexiv space):
+    env (BiFlexiv 20D obs) -> broker (BiFlexiv-space action queue)
+        -> BiFlexivUmiPolicyAdapter (layout regroup + per-arm frame transform)
+        -> WebsocketClientPolicy -> UMI policy server
+
+This is a reduced variant of examples/bi_flexiv_rizon4_rt/main.py: no
+recording, no Pico4 intervention, no decoupled runtime — just the synchronous
+Runtime with optional RTC action chunking.
+
 Example::
 
     python -m examples.umi_bi_flexiv_rizon4_rt.main \
@@ -12,6 +21,16 @@ Example::
         --args.runtime-hz 30 \
         --args.rtc-enabled \
         --args.dry-run
+
+    python -m examples.umi_bi_flexiv_rizon4_rt.main \
+        --args.host 192.168.142.220 \
+        --args.port 8000 \
+        --args.bi-mount-type forward \
+        --args.inner-control-hz 1000 \
+        --args.interpolate-cmds \
+        --args.runtime-hz 30 \
+        --args.rtc-enabled \
+        --args.frame-calibration frame_calibration_identity.json
 """
 
 from dataclasses import dataclass
@@ -39,7 +58,11 @@ logger = get_logger("UmiBiFlexivRizon4RTMain")
 
 
 class DryRunEnvironmentWrapper(_environment.Environment):
-    """Print BiFlexiv-space actions without sending them to the robot."""
+    """Intercepts policy actions and prints them without executing on robot.
+
+    The actions printed here are already converted back to native BiFlexiv
+    space by the policy adapter — i.e. exactly what the robot would execute.
+    """
 
     def __init__(self, wrapped: UmiBiFlexivRizon4RTEnvironment) -> None:
         self._wrapped_env = wrapped
@@ -75,11 +98,17 @@ class DryRunEnvironmentWrapper(_environment.Environment):
 
 @dataclass
 class Args:
+    """Arguments for UMI inference on BiFlexiv Rizon4 RT."""
+
+    # Policy server
     host: str = "localhost"
     port: int = 8000
+    # Task prompt for the policy. None = fall back to the checkpoint's
+    # default_prompt (see the training config's LeRobotUmiDataConfig).
     prompt: str | None = None
 
-    bi_mount_type: str = "forward"
+    # Robot configuration
+    bi_mount_type: str = "forward"  # short name; "forward" resolves to the "forward-06" preset
     use_force: bool = False
     go_to_start: bool = True
     stiffness_ratio: float = 0.2
@@ -87,16 +116,26 @@ class Args:
     interpolate_cmds: bool = True
     log_level: str = "INFO"
 
+    # Image rendering
     render_height: int = 224
     render_width: int = 224
+
+    # Runtime settings
     runtime_hz: float = 30.0
     num_episodes: int = 1
     max_episode_steps: int = 1_000_000
 
+    # Dry run mode
     dry_run: bool = False
+
+    # Per-arm UMI-world -> Flexiv-arm frame calibration (JSON with two 4x4
+    # matrices). Required for real execution; dry-run may use identity.
     frame_calibration: Path | None = None
+
+    # Non-RTC action chunking
     action_horizon: int = 50
 
+    # RTC config
     rtc_enabled: bool = False
     action_queue_size_to_get_new_actions: int = 30
     execution_horizon: int = 50
@@ -105,14 +144,23 @@ class Args:
 
 
 def main(args: Args) -> None:
+    # UMI checkpoints consume the 20D pose/gripper space only — force/wrench
+    # readings would change the state layout, so refuse them up front.
     if args.use_force:
         raise SystemExit("UMI checkpoints use a 20D pose/gripper state; --args.use-force is unsupported")
+    # BiFlexiv reports each TCP in its own arm frame while UMI data lives in a
+    # shared Pico4 world frame. Executing with identity transforms by accident
+    # would send poses in the wrong frame, so real execution requires an
+    # explicit calibration file (identity included — an explicit choice).
     if not args.dry_run and args.frame_calibration is None:
         raise SystemExit(
             "Real execution requires separate left/right UMI↔Flexiv calibration matrices. "
             "Pass --args.frame-calibration <json>; use --args.dry-run while uncalibrated."
         )
     if args.runtime_hz != 30.0:
+        # The checkpoint was trained on 30 Hz data; RTC's delay estimation also
+        # reads frequency_hz, so drifting from 30 Hz hurts both the policy
+        # distribution and the RTC merge math.
         logger.warning(f"UMI data was recorded at 30 Hz; requested runtime_hz={args.runtime_hz}")
 
     websocket_policy = _websocket_client_policy.WebsocketClientPolicy(host=args.host, port=args.port)
@@ -126,6 +174,8 @@ def main(args: Args) -> None:
         logger.info(f"Loaded per-arm frame calibration from {args.frame_calibration}")
     else:
         logger.warning("No frame calibration supplied; dry-run uses identity transforms for both arms")
+    # Conversion boundary: brokers/queues below this adapter stay in native
+    # BiFlexiv space; only websocket requests/responses are in UMI space.
     converted_policy = BiFlexivUmiPolicyAdapter(websocket_policy, transform=transform, prompt=args.prompt)
 
     base_environment = UmiBiFlexivRizon4RTEnvironment(
@@ -148,6 +198,12 @@ def main(args: Args) -> None:
         environment = base_environment
 
     if args.rtc_enabled:
+        # The broker's queue holds BiFlexiv-space actions (the adapter converts
+        # server responses back). prev_chunk_left_over takes the opposite trip:
+        # broker (BiFlexiv) -> adapter -> server (UMI), where the server
+        # re-bases it through the training input pipeline before freezing the
+        # prefix. frequency_hz must match the real consumption rate — the
+        # synchronous Runtime pops at runtime_hz.
         broker = rtc_action_chunk_broker.RTCActionChunkBroker(
             policy=converted_policy,
             frequency_hz=args.runtime_hz,
@@ -179,6 +235,12 @@ def main(args: Args) -> None:
         except Exception as error:
             logger.warning(f"Error while disconnecting: {error}")
 
+    # SIGINT handling: ask the runtime to wind down; the `finally` then runs
+    # disconnect(), which homes the arms via the driver's own shutdown — same
+    # end-state as bi_flexiv_rizon4_rt. Unlike bi_flexiv_rizon4_rt there is no
+    # os._exit escape on a second Ctrl+C: the handler is idempotent, so repeated
+    # presses just re-request the stop (forcing exit mid-homing would leave the
+    # arms in an unknown pose).
     def signal_handler(sig, frame) -> None:
         del sig, frame
         logger.info("Ctrl+C received; stopping runtime")

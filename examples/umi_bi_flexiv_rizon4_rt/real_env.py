@@ -1,4 +1,18 @@
-"""BiFlexiv Rizon4 RT real environment with the head camera disabled."""
+"""BiFlexiv Rizon4 RT real environment with the head camera disabled.
+
+Wraps lerobot BiFlexivRizon4RT for UMI inference with OpenPI.
+
+State/action format (native BiFlexiv 20D, same as bi_flexiv_rizon4_rt):
+    [left_tcp.x/y/z/r1-r6 (0-8), right_tcp.x/y/z/r1-r6 (9-17),
+     left_gripper.pos (18), right_gripper.pos (19)]
+
+Differences from examples/bi_flexiv_rizon4_rt/real_env.py:
+    - Only the two wrist cameras are connected (UMI training data has no
+      third-person view); the head RealSense injected by the lerobot config
+      is removed before the robot object is constructed.
+    - Tactile sensors and force/wrench readings are disabled — UMI
+      checkpoints consume the 20D pose/gripper space only.
+"""
 
 import collections
 import time
@@ -96,11 +110,17 @@ class UmiBiFlexivRizon4RTRealEnv:
         return obs
 
     def reset(self) -> None:
+        """Reset both arms to start positions and wait for completion."""
         logger.info("Resetting BiFlexiv Rizon4 RT to its configured start pose")
         self.robot.reset_to_initial_position()
 
         # reset_to_initial_position() uses a non-blocking RT trajectory. Wait
         # for it to start and then finish before policy execution begins.
+        # Phase 1: wait for rt_moving to become True (RT thread picks up request).
+        # Phase 2: wait for rt_moving to become False (trajectory complete).
+        # Unlike bi_flexiv_rizon4_rt (which logs and proceeds on a slow reset),
+        # a 15 s overrun raises — starting UMI inference from an unknown mid-
+        # reset pose is more dangerous than aborting the episode.
         start = time.monotonic()
         while not self.robot.rt_moving:
             if time.monotonic() - start > 1.0:
@@ -114,10 +134,13 @@ class UmiBiFlexivRizon4RTRealEnv:
 
     @staticmethod
     def _build_action_dict(action: np.ndarray) -> dict[str, float]:
+        """Build the per-key action dict that BiFlexivRizon4RT.send_action expects."""
         values = np.asarray(action)
         if values.shape != (20,):
             raise ValueError(f"Expected a BiFlexiv action with shape (20,), got {values.shape}")
 
+        # Grippers are clipped to [0, 1]; TCP pose values pass through verbatim
+        # (same convention as bi_flexiv_rizon4_rt).
         action_dict = {
             "left_tcp.x": float(values[0]),
             "left_tcp.y": float(values[1]),
@@ -134,9 +157,24 @@ class UmiBiFlexivRizon4RTRealEnv:
         return action_dict
 
     def send_action(self, action: np.ndarray) -> None:
+        """Send a 20D action to the robot. Does NOT read observations.
+
+        Kept separate from get_observation() so the outer runtime loop owns
+        obs scheduling — same contract as bi_flexiv_rizon4_rt.
+
+        Args:
+            action: [left_tcp(0-8), right_tcp(9-17), left_gripper(18), right_gripper(19)]
+        """
         self.robot.send_action(self._build_action_dict(action))
 
     def disconnect(self) -> None:
+        """Disconnect both arms, grippers, and cameras.
+
+        The robot driver's own disconnect() performs the safe RT-thread stop,
+        home motion, and resource cleanup, so no emergency-stop fallback is
+        needed here (unlike bi_flexiv_rizon4_rt, which wraps one around a
+        legacy lerobot build).
+        """
         if self.robot.is_connected:
             logger.info("Disconnecting BiFlexiv Rizon4 RT")
             self.robot.disconnect()

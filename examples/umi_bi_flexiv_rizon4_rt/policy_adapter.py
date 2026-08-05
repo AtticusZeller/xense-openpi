@@ -31,6 +31,8 @@ class BiFlexivUmiPolicyAdapter(_base_policy.BasePolicy):
 
     @override
     def infer(self, obs: dict, **kwargs) -> dict:
+        # Note: obs may carry "images_raw" (original-resolution HWC images for
+        # recording); only the resized CHW "images" are forwarded to the server.
         images = obs.get("images")
         if not isinstance(images, Mapping):
             raise ValueError("Observation must contain an 'images' mapping")
@@ -62,6 +64,10 @@ class BiFlexivUmiPolicyAdapter(_base_policy.BasePolicy):
         # Only action chunks and scalar/dict timing metadata should reach the
         # action broker. In particular, drop model-space `actions_original` and
         # the array-valued server `state`, which are not executable actions.
+        # result["actions"] are ABSOLUTE UMI-frame poses — the server's output
+        # pipeline (AbsoluteActions) has already un-deltaed the model output
+        # against the state we sent — so the rigid transform below is applied
+        # to absolute poses, as required.
         converted = {
             "actions": self._transform.umi_actions_to_flexiv(np.asarray(result["actions"])),
         }
