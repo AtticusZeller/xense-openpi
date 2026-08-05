@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.bi_flexiv_policy as bi_flexiv_policy
 import openpi.policies.droid_policy as droid_policy
+import openpi.policies.umi_policy as umi_policy
 import openpi.policies.xense_flare_policy as xense_flare_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
@@ -506,6 +507,79 @@ class LeRobotBiFlexivDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotUmiDataConfig(DataConfigFactory):
+    """
+    Data config for UMI (bi_taccap_gripper) bimanual tactile-gripper datasets in LeRobot format
+    (e.g. TacVerse/taccap-g1-*, collected with xense-taccap-lerobot).
+
+    State/action format (20D, Cartesian with 6D rotation, per-side grouped):
+        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + left_gripper.pos (1D, dim 9)
+        right_tcp.{x, y, z, r1-r6} (9D, dims 10-18) + right_gripper.pos (1D, dim 19)
+
+    Note the layout differs from bi_flexiv datasets (where grippers are dims 18-19) --
+    always check `features.observation.state.names` in the dataset's meta/info.json.
+
+    Cameras: left_wrist, right_wrist. There is no third-person camera; the model base_0_rgb
+    slot is filled with a black image and masked out. The wrist cameras remain in their
+    corresponding left/right wrist slots (see umi_policy.UmiInputs).
+
+    Poses are absolute next-step TCP poses in the Pico4 SLAM world frame (gravity aligned);
+    deltas w.r.t. the current state are computed at train/inference time.
+    """
+
+    use_delta_cartesian_actions: bool = True
+    # If provided, will be injected into the input data if the "prompt" key is not present.
+    default_prompt: str | None = None
+
+    # Repack transforms: map dataset column names to policy expected format.
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {
+                            "left_wrist": "observation.images.left_wrist",
+                            "right_wrist": "observation.images.right_wrist",
+                        },
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "task",
+                    }
+                )
+            ]
+        )
+    )
+    # Action keys that will be used to read the action sequence from the dataset.
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        data_transforms = _transforms.Group(
+            inputs=[umi_policy.UmiInputs()],
+            outputs=[umi_policy.UmiOutputs()],
+        )
+
+        if self.use_delta_cartesian_actions:
+            # Per-side grouped layout: [left_tcp(0-8), left_gripper(9), right_tcp(10-18), right_gripper(19)]
+            # TCP dims (0-8, 10-18) become deltas w.r.t. the current state; gripper dims (9, 19) stay absolute.
+            delta_action_mask = _transforms.make_bool_mask(9, -1, 9, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class TrainConfig:
     # Name of the config. Must be unique. Will be used to reference this config.
     name: tyro.conf.Suppress[str]
@@ -916,6 +990,31 @@ _CONFIGS = [
         overwrite=True,
         exp_name="debug_pi05",
         wandb_enabled=False,
+    ),
+    TrainConfig(
+        name="pi05_base_umi_sort_defective_parts_0710",
+        model=pi0_config.Pi0Config(
+            paligemma_variant="gemma_2b",
+            action_expert_variant="gemma_300m",
+            pi05=True,
+            discrete_state_input=True,
+            enable_training_time_rtc=True,
+            max_delay=10,
+        ),
+        data=LeRobotUmiDataConfig(
+            repo_id="TacVerse/taccap-g1-sort-defective-parts-0710",
+            use_delta_cartesian_actions=True,
+            default_prompt="Pick up the parts one by one and place each part into its matching bin, sorting the parts by whether they have defects or oxidation until all the defective parts and the intact parts are separated into their own bins",
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+        ),
+        ema_decay=None,
+        batch_size=256,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        num_train_steps=80_000,
+        num_workers=64,
+        fsdp_devices=8,
     ),
     #
     # RoboArena configs.

@@ -93,6 +93,11 @@ data:
   # repack_transforms: <Group object — keep default; rarely override>
   # action_sequence_keys: [action]
 
+  # ---- LeRobotUmiDataConfig-specific (uncomment when used) ----
+  # use_delta_cartesian_actions: true  # delta-encode TCP dims 0-8 & 10-18, keep grippers (9, 19) absolute
+  # default_prompt: "..."
+  # base_0_rgb is black/masked; wrist cameras stay in their matching wrist slots
+
   # ---- LeRobotXenseFlareDataConfig-specific (uncomment when used) ----
   # use_delta_cartesian_actions: true
   # default_prompt: "..."

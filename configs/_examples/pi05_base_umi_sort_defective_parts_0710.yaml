@@ -1,0 +1,25 @@
+# UMI (bi_taccap_gripper) bimanual dataset, no tactile, wrist camera promoted to base.
+# Deploy target: bi_flexiv (dual Flexiv Rizon4 RT). See src/openpi/policies/umi_policy.py.
+model:
+  type: Pi0Config
+  max_token_len: 200
+  pi05: true
+  discrete_state_input: true
+  enable_training_time_rtc: true
+weight_loader:
+  type: CheckpointWeightLoader
+  params_path: gs://openpi-assets/checkpoints/pi05_base/params
+ema_decay: null
+data:
+  type: LeRobotUmiDataConfig
+  repo_id: TacVerse/taccap-g1-sort-defective-parts-0710
+  use_delta_cartesian_actions: true
+  base_config:
+    prompt_from_task: true
+  default_prompt: Pick up the parts one by one and place each part into its matching bin,
+    sorting the parts by whether they have defects or oxidation until all the defective
+    parts and the intact parts are separated into their own bins
+batch_size: 256
+num_workers: 64
+num_train_steps: 80000
+fsdp_devices: 8
