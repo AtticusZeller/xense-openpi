@@ -1,4 +1,4 @@
-# UMI (bi_taccap_gripper) bimanual dataset, no tactile, wrist camera promoted to base.
+# UMI bimanual dataset: head/base masked, left and right wrists stay in matching slots.
 # Deploy target: bi_flexiv (dual Flexiv Rizon4 RT). See src/openpi/policies/umi_policy.py.
 model:
   type: Pi0Config
