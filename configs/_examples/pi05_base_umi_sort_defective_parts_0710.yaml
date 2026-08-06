@@ -1,6 +1,9 @@
-# UMI bimanual dataset, converted to first-frame-relative BiFlexiv layout by
+# UMI bimanual dataset, converted to first-frame-relative coordinates by
 # scripts/convert_umi_first_frame_relative.py: poses are expressed per arm in the
-# episode's first-frame TCP frame; grippers moved to dims 18-19 (BiFlexiv layout).
+# episode's first-frame TCP frame; the dataset keeps the native UMI
+# per-side-grouped layout [left_tcp(0-8), left_gripper(9), right_tcp(10-18),
+# right_gripper(19)]. Regrouping to the BiFlexiv robot layout happens at
+# inference time in the client-side adapter.
 # head/base masked, left and right wrists stay in matching slots.
 # Deploy target: bi_flexiv (dual Flexiv Rizon4 RT). See src/openpi/policies/umi_policy.py.
 model:

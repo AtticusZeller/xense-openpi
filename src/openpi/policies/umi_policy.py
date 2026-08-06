@@ -10,9 +10,9 @@ from openpi import transforms
 def make_umi_example() -> dict:
     """Creates a random input example for the UMI (bi_taccap) policy.
 
-    State format (20D, BiFlexiv layout after conversion):
-        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + right_tcp.{x, y, z, r1-r6} (9D, dims 9-17)
-        left_gripper.pos (1D, dim 18) + right_gripper.pos (1D, dim 19)
+    State format (20D, UMI per-side-grouped layout):
+        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + left_gripper.pos (1D, dim 9)
+        right_tcp.{x, y, z, r1-r6} (9D, dims 10-18) + right_gripper.pos (1D, dim 19)
     """
     return {
         "state": np.ones((20,)),
@@ -33,10 +33,12 @@ class UmiInputs(transforms.DataTransformFn):
       required. A head camera is accepted for client compatibility; it is used for the
       base_0_rgb slot only when `use_head_camera` is True, otherwise it is ignored.
     - state: [20] = [left_tcp.x, left_tcp.y, left_tcp.z, left_tcp.r1..r6,
+                     left_gripper.pos,
                      right_tcp.x, right_tcp.y, right_tcp.z, right_tcp.r1..r6,
-                     left_gripper.pos, right_gripper.pos]
-      (BiFlexiv layout: left TCP dims 0-8, right TCP dims 9-17, grippers dims 18-19;
-      poses are first-frame-relative, see scripts/convert_umi_first_frame_relative.py)
+                     right_gripper.pos]
+      (UMI per-side-grouped layout: left TCP dims 0-8, left gripper dim 9, right TCP
+      dims 10-18, right gripper dim 19; poses are first-frame-relative, see
+      scripts/convert_umi_first_frame_relative.py)
     - actions: [action_horizon, 20]
 
     By default UMI datasets have no third-person camera: the model base_0_rgb slot is
@@ -114,9 +116,9 @@ class UmiInputs(transforms.DataTransformFn):
 class UmiOutputs(transforms.DataTransformFn):
     """Outputs for the UMI (bi_taccap) policy.
 
-    Model output format (20 dims, BiFlexiv layout):
-        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + right_tcp.{x, y, z, r1-r6} (9D, dims 9-17)
-        left_gripper.pos (1D, dim 18) + right_gripper.pos (1D, dim 19)
+    Model output format (20 dims, UMI per-side-grouped layout):
+        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + left_gripper.pos (1D, dim 9)
+        right_tcp.{x, y, z, r1-r6} (9D, dims 10-18) + right_gripper.pos (1D, dim 19)
 
     No conversion needed - 6D rotation is already in the correct format.
     """

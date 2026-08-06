@@ -1,19 +1,19 @@
-"""Convert a UMI (bi_taccap) LeRobot dataset to first-frame-relative BiFlexiv layout.
+"""Convert a UMI (bi_taccap) LeRobot dataset to first-frame-relative coordinates.
 
-Two transformations are baked into a new dataset copy:
+For every episode, the first frame's left and right TCP poses (position +
+orientation) define per-arm reference frames; all `observation.state` and
+`action` poses in that episode are re-expressed in those frames. Gripper dims
+pass through untouched.
 
-1. First-frame-relative coordinates: for every episode, the first frame's left and
-   right TCP poses (position + orientation) define per-arm reference frames; all
-   `observation.state` and `action` poses in that episode are re-expressed in
-   those frames. Gripper dims pass through untouched.
-2. Layout regrouping: UMI per-side-grouped [left_tcp(0-8), left_gripper(9),
-   right_tcp(10-18), right_gripper(19)] -> BiFlexiv layout [left_tcp(0-8),
-   right_tcp(9-17), left_gripper(18), right_gripper.pos(19)] — matching what the
-   BiFlexiv robot driver reports at inference time.
+The dataset keeps the native UMI per-side-grouped layout
+[left_tcp(0-8), left_gripper(9), right_tcp(10-18), right_gripper(19)].
+Regrouping to the BiFlexiv layout reported by the robot driver happens at
+inference time in the client-side adapter
+(examples/umi_bi_flexiv_rizon4_rt/frame_transform.py).
 
 The output is a regular LeRobot v3.0 dataset (videos hard-linked, data parquets
-rewritten, meta/info.json feature names reordered, meta/stats.json and the
-per-episode stats in meta/episodes recomputed for the converted columns).
+rewritten, meta/stats.json and the per-episode stats in meta/episodes
+recomputed for the converted columns).
 
 Example:
 
@@ -45,14 +45,11 @@ logger = logging.getLogger(__name__)
 STATE_COL = "observation.state"
 ACTION_COL = "action"
 
-# Source (UMI per-side grouped) dim slices.
+# UMI per-side-grouped dim slices (layout is preserved by the conversion).
 _SRC_LEFT_TCP = slice(0, 9)
 _SRC_LEFT_GRIPPER = slice(9, 10)
 _SRC_RIGHT_TCP = slice(10, 19)
 _SRC_RIGHT_GRIPPER = slice(19, 20)
-
-# Destination (BiFlexiv) permutation: [left_tcp, right_tcp, left_gripper, right_gripper].
-_DST_PERM = [*range(9), *range(10, 19), 9, 19]
 
 # Stat fields present in meta/stats.json and meta/episodes parquet stat columns.
 _STAT_FIELDS = ("min", "max", "mean", "std", "count", "q01", "q10", "q50", "q90", "q99")
@@ -191,16 +188,15 @@ def convert_dataset(src_root: pathlib.Path, dst_root: pathlib.Path) -> None:
         ref_right_inv[ep] = np.linalg.inv(_pose9_to_matrix(first_state[_SRC_RIGHT_TCP]))
 
     def _convert(values: np.ndarray) -> np.ndarray:
-        """First-frame-relative transform (per arm) + UMI -> BiFlexiv layout regroup."""
+        """First-frame-relative transform (per arm); layout stays UMI per-side-grouped."""
         rows_left_inv = np.stack([ref_left_inv[ep] for ep in episode])
         rows_right_inv = np.stack([ref_right_inv[ep] for ep in episode])
         left_rel = _transform_pose9(values[:, _SRC_LEFT_TCP], rows_left_inv)
         right_rel = _transform_pose9(values[:, _SRC_RIGHT_TCP], rows_right_inv)
-        src_layout = np.concatenate(
+        return np.concatenate(
             (left_rel, values[:, _SRC_LEFT_GRIPPER], right_rel, values[:, _SRC_RIGHT_GRIPPER]),
             axis=-1,
-        )
-        return src_layout[:, _DST_PERM].astype(np.float32)
+        ).astype(np.float32)
 
     new_states = _convert(states)
     new_actions = _convert(actions)
@@ -211,8 +207,8 @@ def convert_dataset(src_root: pathlib.Path, dst_root: pathlib.Path) -> None:
         first_row = ep_rows[np.argmin(frame[ep_rows])]
         first = new_states[first_row]
         np.testing.assert_allclose(first[0:9], _IDENTITY_POSE9, atol=1e-4, err_msg=f"ep {ep} left first pose")
-        np.testing.assert_allclose(first[9:18], _IDENTITY_POSE9, atol=1e-4, err_msg=f"ep {ep} right first pose")
-        np.testing.assert_allclose(first[18], states[first_row][_SRC_LEFT_GRIPPER], atol=1e-6)
+        np.testing.assert_allclose(first[10:19], _IDENTITY_POSE9, atol=1e-4, err_msg=f"ep {ep} right first pose")
+        np.testing.assert_allclose(first[9], states[first_row][_SRC_LEFT_GRIPPER], atol=1e-6)
         np.testing.assert_allclose(first[19], states[first_row][_SRC_RIGHT_GRIPPER], atol=1e-6)
 
     # ---- Rewrite data parquets with the converted columns. ----
@@ -227,17 +223,6 @@ def convert_dataset(src_root: pathlib.Path, dst_root: pathlib.Path) -> None:
             table = table.set_column(col_idx, field, list_array)
         pq.write_table(table, parquet_path.with_suffix(".tmp"))
         os.replace(parquet_path.with_suffix(".tmp"), parquet_path)
-
-    # ---- meta/info.json: reorder feature names to the BiFlexiv layout. ----
-    info_path = dst_root / "meta" / "info.json"
-    info = json.loads(info_path.read_text())
-    for feature in (STATE_COL, ACTION_COL):
-        names = info["features"][feature].get("names")
-        if names is not None:
-            if len(names) != 20:
-                raise ValueError(f"Expected 20 names for {feature}, got {len(names)}")
-            info["features"][feature]["names"] = [names[i] for i in _DST_PERM]
-    _atomic_replace(info_path, lambda tmp: tmp.write_text(json.dumps(info, indent=2)))
 
     # ---- meta/stats.json: recompute stats for the converted columns. ----
     stats_path = dst_root / "meta" / "stats.json"

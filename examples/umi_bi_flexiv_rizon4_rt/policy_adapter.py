@@ -11,18 +11,20 @@ from examples.umi_bi_flexiv_rizon4_rt.frame_transform import PerArmFirstFrameTra
 
 
 class BiFlexivUmiPolicyAdapter(_base_policy.BasePolicy):
-    """Keep brokers in native BiFlexiv space while the server stays in first-frame-relative space.
+    """Keep brokers in native BiFlexiv space while the server stays in first-frame-relative UMI space.
 
-    Both sides use the native BiFlexiv layout
-    [left_tcp(0-8), right_tcp(9-17), left_gripper(18), right_gripper(19)] — the
-    training data was converted to it by scripts/convert_umi_first_frame_relative.py —
-    so the only conversion here is the per-arm coordinate frame: the episode's
-    first observation defines each arm's reference frame, captured lazily on the
-    first infer() after reset().
+    The robot side uses the native BiFlexiv layout
+    [left_tcp(0-8), right_tcp(9-17), left_gripper(18), right_gripper(19)], while
+    the policy side uses the UMI per-side-grouped layout
+    [left_tcp(0-8), left_gripper(9), right_tcp(10-18), right_gripper(19)] that
+    the training data keeps (see scripts/convert_umi_first_frame_relative.py).
+    PerArmFirstFrameTransform handles both the layout regrouping and the per-arm
+    coordinate frame: the episode's first observation defines each arm's
+    reference frame, captured lazily on the first infer() after reset().
 
     This conversion boundary also handles RTC's ``prev_chunk_left_over``. That
     array is made of absolute BiFlexiv actions held by the client-side queue and
-    must be converted to first-frame-relative space before the server applies
+    must be converted to first-frame-relative UMI space before the server applies
     its training transforms.
     """
 

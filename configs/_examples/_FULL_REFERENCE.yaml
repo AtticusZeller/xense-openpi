@@ -94,11 +94,12 @@ data:
   # action_sequence_keys: [action]
 
   # ---- LeRobotUmiDataConfig-specific (uncomment when used) ----
-  # use_delta_cartesian_actions: true  # delta-encode TCP dims 0-17, keep grippers (18, 19) absolute
+  # use_delta_cartesian_actions: true  # delta-encode TCP dims 0-8 & 10-18, keep grippers (9, 19) absolute
   # use_head_camera: false             # true = head fills base_0_rgb (mask on); false = base masked out
   # default_prompt: "..."
-  # Expects first-frame-relative BiFlexiv-layout data (scripts/convert_umi_first_frame_relative.py);
-  # wrist cameras stay in their matching wrist slots
+  # Expects first-frame-relative data in the native UMI per-side-grouped layout
+  # (scripts/convert_umi_first_frame_relative.py); wrist cameras stay in their
+  # matching wrist slots
 
   # ---- LeRobotXenseFlareDataConfig-specific (uncomment when used) ----
   # use_delta_cartesian_actions: true

@@ -111,6 +111,13 @@ class Args:
     interpolate_cmds: bool = True
     log_level: str = "INFO"
 
+    # Policy-space conversion. Enabled by default: the robot driver reports TCP
+    # orientations in the BiFlexiv gripper frame (z forward, y right, x up) and
+    # the adapter rotates them into the UMI gripper frame (x forward, y left,
+    # z up) the training data uses. Disable with --args.no-align-gripper-frames
+    # only if the driver already reports UMI-convention poses.
+    align_gripper_frames: bool = True
+
     # Image rendering
     render_height: int = 224
     render_width: int = 224
@@ -152,7 +159,9 @@ def main(args: Args) -> None:
     # first-frame-relative policy space. The per-arm reference frame is
     # captured from the episode's first observation (re-captured on reset).
     converted_policy = BiFlexivUmiPolicyAdapter(
-        websocket_policy, transform=PerArmFirstFrameTransform(), prompt=args.prompt
+        websocket_policy,
+        transform=PerArmFirstFrameTransform(align_gripper_frames=args.align_gripper_frames),
+        prompt=args.prompt,
     )
 
     base_environment = UmiBiFlexivRizon4RTEnvironment(

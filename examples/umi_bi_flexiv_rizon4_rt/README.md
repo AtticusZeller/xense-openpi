@@ -18,7 +18,14 @@ python scripts/serve_policy.py policy:checkpoint \
 The checkpoint must have been trained with the current UMI data conventions:
 `base_0_rgb` black/masked, left wrist in the left slot, right wrist in the
 right slot, and states/actions expressed per arm in the episode's first-frame
-TCP frame with the BiFlexiv dim layout (grippers at dims 18-19).
+TCP frame in the native UMI per-side-grouped dim layout
+`[left_tcp(0-8), left_gripper(9), right_tcp(10-18), right_gripper(19)]`. The
+client-side adapter regroups between this policy layout and the BiFlexiv robot
+layout at inference time, and by default also rotates TCP orientations from the
+BiFlexiv gripper frame (z forward, y right, x up) into the UMI gripper frame
+(x forward, y left, z up) used by the training data; pass
+`--args.no-align-gripper-frames` only if the driver already reports
+UMI-convention poses.
 
 ## Dry-run client
 

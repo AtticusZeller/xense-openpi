@@ -6,7 +6,8 @@ State/action format (native BiFlexiv 20D, identical to bi_flexiv_rizon4_rt):
 
 Unlike examples/bi_flexiv_rizon4_rt, this layer does NOT talk to the policy
 in the model's own space: conversion to the policy's first-frame-relative
-coordinate space (per arm, layout unchanged) happens in
+coordinate space (per arm) and the regrouping to the policy-side UMI
+per-side-grouped layout happen in
 policy_adapter.BiFlexivUmiPolicyAdapter, so everything below
 the broker stays in the native BiFlexiv space the robot driver understands.
 """

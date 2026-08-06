@@ -512,13 +512,15 @@ class LeRobotUmiDataConfig(DataConfigFactory):
     Data config for UMI (bi_taccap_gripper) bimanual tactile-gripper datasets in LeRobot format
     (e.g. TacVerse/taccap-g1-*-ffr, converted by scripts/convert_umi_first_frame_relative.py).
 
-    State/action format (20D, Cartesian with 6D rotation, BiFlexiv layout):
-        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + right_tcp.{x, y, z, r1-r6} (9D, dims 9-17)
-        left_gripper.pos (1D, dim 18) + right_gripper.pos (1D, dim 19)
+    State/action format (20D, Cartesian with 6D rotation, UMI per-side-grouped layout):
+        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + left_gripper.pos (1D, dim 9)
+        right_tcp.{x, y, z, r1-r6} (9D, dims 10-18) + right_gripper.pos (1D, dim 19)
 
-    The conversion script moves the grippers to the trailing dims and re-expresses every
-    episode's poses in the frame of the episode's first-frame TCP pose (per arm), so
-    poses are first-frame-relative rather than absolute Pico4 SLAM world-frame poses.
+    The conversion script re-expresses every episode's poses in the frame of the
+    episode's first-frame TCP pose (per arm) and keeps the native UMI layout, so
+    poses are first-frame-relative rather than absolute Pico4 SLAM world-frame
+    poses. Regrouping to the BiFlexiv robot layout happens at inference time in
+    the client-side adapter (examples/umi_bi_flexiv_rizon4_rt/frame_transform.py).
 
     Cameras: left_wrist, right_wrist, plus an optional head camera (use_head_camera).
     Without a head camera the model base_0_rgb slot is filled with a black image and
@@ -563,9 +565,9 @@ class LeRobotUmiDataConfig(DataConfigFactory):
         )
 
         if self.use_delta_cartesian_actions:
-            # BiFlexiv layout: [left_tcp(0-8), right_tcp(9-17), left_gripper(18), right_gripper(19)]
-            # TCP dims (0-17) become deltas w.r.t. the current state; gripper dims (18, 19) stay absolute.
-            delta_action_mask = _transforms.make_bool_mask(18, -1, -1)
+            # UMI layout: [left_tcp(0-8), left_gripper(9), right_tcp(10-18), right_gripper(19)]
+            # TCP dims (0-8, 10-18) become deltas w.r.t. the current state; gripper dims (9, 19) stay absolute.
+            delta_action_mask = _transforms.make_bool_mask(9, -1, 9, -1)
             data_transforms = data_transforms.push(
                 inputs=[_transforms.DeltaActions(delta_action_mask)],
                 outputs=[_transforms.AbsoluteActions(delta_action_mask)],
