@@ -10,9 +10,9 @@ from openpi import transforms
 def make_umi_example() -> dict:
     """Creates a random input example for the UMI (bi_taccap) policy.
 
-    State format (20D, per-side grouped):
-        left_tcp.{x, y, z, r1-r6} (9D) + left_gripper.pos (1D) = 10D
-        right_tcp.{x, y, z, r1-r6} (9D) + right_gripper.pos (1D) = 10D
+    State format (20D, BiFlexiv layout after conversion):
+        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + right_tcp.{x, y, z, r1-r6} (9D, dims 9-17)
+        left_gripper.pos (1D, dim 18) + right_gripper.pos (1D, dim 19)
     """
     return {
         "state": np.ones((20,)),
@@ -29,15 +29,19 @@ class UmiInputs(transforms.DataTransformFn):
     """Inputs for the UMI (bi_taccap_gripper) bimanual policy.
 
     Expected inputs:
-    - images: dict[name, img] where img is [channel, height, width]. Both wrist cameras are required.
-      A head camera is accepted for client compatibility but is ignored.
-    - state: [20] = [left_tcp.x, left_tcp.y, left_tcp.z, left_tcp.r1..r6, left_gripper.pos,
-                     right_tcp.x, right_tcp.y, right_tcp.z, right_tcp.r1..r6, right_gripper.pos]
-      (per-side grouped: left TCP dims 0-8, left gripper dim 9, right TCP dims 10-18, right gripper dim 19)
+    - images: dict[name, img] where img is [channel, height, width]. Both wrist cameras are
+      required. A head camera is accepted for client compatibility; it is used for the
+      base_0_rgb slot only when `use_head_camera` is True, otherwise it is ignored.
+    - state: [20] = [left_tcp.x, left_tcp.y, left_tcp.z, left_tcp.r1..r6,
+                     right_tcp.x, right_tcp.y, right_tcp.z, right_tcp.r1..r6,
+                     left_gripper.pos, right_gripper.pos]
+      (BiFlexiv layout: left TCP dims 0-8, right TCP dims 9-17, grippers dims 18-19;
+      poses are first-frame-relative, see scripts/convert_umi_first_frame_relative.py)
     - actions: [action_horizon, 20]
 
-    UMI datasets have no third-person camera. The model base_0_rgb slot is filled with a black
-    image and masked out. Each wrist camera is kept in its corresponding wrist slot.
+    By default UMI datasets have no third-person camera: the model base_0_rgb slot is
+    filled with a black image and masked out. Each wrist camera is kept in its
+    corresponding wrist slot.
 
     The 6D rotation representation (r1-r6) consists of the first two columns of the rotation matrix:
     - [r1, r2, r3]: First column of rotation matrix
@@ -45,9 +49,13 @@ class UmiInputs(transforms.DataTransformFn):
     """
 
     # Both wrist cameras are required. A head camera may be supplied by a compatible robot client,
-    # but it is deliberately ignored because UMI training data has no third-person view.
+    # but it is ignored unless `use_head_camera` is True.
     EXPECTED_CAMERAS: ClassVar[tuple[str, ...]] = ("left_wrist", "right_wrist")
     OPTIONAL_CAMERAS: ClassVar[tuple[str, ...]] = ("head",)
+
+    # If True, the head camera is required and fills the base_0_rgb slot (image_mask=True).
+    # If False (default), base_0_rgb is filled with a black image and masked out.
+    use_head_camera: bool = False
 
     def __call__(self, data: dict) -> dict:
         data = _decode_umi(data)
@@ -64,13 +72,22 @@ class UmiInputs(transforms.DataTransformFn):
         left_wrist = in_images["left_wrist"]
         right_wrist = in_images["right_wrist"]
 
+        if self.use_head_camera:
+            if "head" not in in_images:
+                raise ValueError(f"use_head_camera=True but no 'head' image; got {tuple(in_images)}")
+            base_image = in_images["head"]
+            base_mask = np.True_
+        else:
+            base_image = np.zeros_like(left_wrist)
+            base_mask = np.False_
+
         images = {
-            "base_0_rgb": np.zeros_like(left_wrist),
+            "base_0_rgb": base_image,
             "left_wrist_0_rgb": left_wrist,
             "right_wrist_0_rgb": right_wrist,
         }
         image_masks = {
-            "base_0_rgb": np.False_,
+            "base_0_rgb": base_mask,
             "left_wrist_0_rgb": np.True_,
             "right_wrist_0_rgb": np.True_,
         }
@@ -97,9 +114,9 @@ class UmiInputs(transforms.DataTransformFn):
 class UmiOutputs(transforms.DataTransformFn):
     """Outputs for the UMI (bi_taccap) policy.
 
-    Model output format (20 dims, per-side grouped):
-        left_tcp.{x, y, z, r1-r6} (9D) + left_gripper.pos (1D) = 10D
-        right_tcp.{x, y, z, r1-r6} (9D) + right_gripper.pos (1D) = 10D
+    Model output format (20 dims, BiFlexiv layout):
+        left_tcp.{x, y, z, r1-r6} (9D, dims 0-8) + right_tcp.{x, y, z, r1-r6} (9D, dims 9-17)
+        left_gripper.pos (1D, dim 18) + right_gripper.pos (1D, dim 19)
 
     No conversion needed - 6D rotation is already in the correct format.
     """

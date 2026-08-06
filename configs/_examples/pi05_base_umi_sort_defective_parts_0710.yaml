@@ -1,18 +1,21 @@
-# UMI bimanual dataset: head/base masked, left and right wrists stay in matching slots.
+# UMI bimanual dataset, converted to first-frame-relative BiFlexiv layout by
+# scripts/convert_umi_first_frame_relative.py: poses are expressed per arm in the
+# episode's first-frame TCP frame; grippers moved to dims 18-19 (BiFlexiv layout).
+# head/base masked, left and right wrists stay in matching slots.
 # Deploy target: bi_flexiv (dual Flexiv Rizon4 RT). See src/openpi/policies/umi_policy.py.
 model:
   type: Pi0Config
   max_token_len: 200
   pi05: true
   discrete_state_input: true
-  enable_training_time_rtc: true
+  # enable_training_time_rtc: true
 weight_loader:
   type: CheckpointWeightLoader
   params_path: gs://openpi-assets/checkpoints/pi05_base/params
 ema_decay: null
 data:
   type: LeRobotUmiDataConfig
-  repo_id: TacVerse/taccap-g1-sort-defective-parts-0710
+  repo_id: TacVerse/taccap-g1-sort-defective-parts-0710-ffr
   use_delta_cartesian_actions: true
   base_config:
     prompt_from_task: true

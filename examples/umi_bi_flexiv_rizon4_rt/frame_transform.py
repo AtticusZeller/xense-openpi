@@ -1,42 +1,23 @@
-"""Per-arm coordinate conversion between UMI world and Flexiv arm frames.
+"""Per-arm first-frame-relative coordinate conversion for BiFlexiv <-> policy space.
 
-Layout conventions (both directions preserve gripper values untouched):
+Layout convention (both the robot driver and the policy use the native BiFlexiv
+layout; gripper values are always passed through untouched):
 
-    BiFlexiv native (robot driver + this client's brokers):
-        [left_tcp(0-8), right_tcp(9-17), left_gripper(18), right_gripper(19)]
-    UMI per-side grouped (training data + policy server):
-        [left_tcp(0-8), left_gripper(9), right_tcp(10-18), right_gripper(19)]
+    [left_tcp(0-8), right_tcp(9-17), left_gripper(18), right_gripper(19)]
 
 Each 9D TCP pose is [x, y, z, r1..r6] where r1-r3 / r4-r6 are the first two
 COLUMNS of the rotation matrix ("On the Continuity of Rotation Representations
 in Neural Networks") — the same convention as the BiFlexiv lerobot driver and
 openpi's umi_policy.UmiInputs.
 
-Frame convention: BiFlexiv reports each TCP in its own arm base frame, while
-UMI training poses are absolute next-step TCP poses in the shared Pico4 SLAM
-world frame. `left/right_flexiv_from_umi` are the rigid transforms mapping a
-pose expressed in the UMI world frame into each arm's base frame.
+Frame convention: training data is first-frame-relative — every episode expresses
+all of its states/actions in the frame of the episode's first-frame TCP pose, per
+arm (see scripts/convert_umi_first_frame_relative.py). At inference the same
+convention is reproduced by capturing the episode's first observation as the
+reference frame and re-capturing on every episode reset.
 """
 
-from dataclasses import dataclass
-import json
-from pathlib import Path
-
 import numpy as np
-
-
-def _rigid_transform(value: object, *, name: str) -> np.ndarray:
-    matrix = np.asarray(value, dtype=np.float64)
-    if matrix.shape != (4, 4) or not np.all(np.isfinite(matrix)):
-        raise ValueError(f"{name} must be a finite 4x4 matrix, got {matrix.shape}")
-    if not np.allclose(matrix[3], [0.0, 0.0, 0.0, 1.0], atol=1e-6):
-        raise ValueError(f"{name} has an invalid homogeneous bottom row")
-    rotation = matrix[:3, :3]
-    if not np.allclose(rotation.T @ rotation, np.eye(3), atol=1e-5):
-        raise ValueError(f"{name} rotation is not orthonormal")
-    if not np.isclose(np.linalg.det(rotation), 1.0, atol=1e-5):
-        raise ValueError(f"{name} rotation determinant must be +1")
-    return matrix
 
 
 def _pose9_to_matrix(pose: np.ndarray) -> np.ndarray:
@@ -84,74 +65,76 @@ def _transform_pose9(pose: np.ndarray, target_from_source: np.ndarray) -> np.nda
     return _matrix_to_pose9(target_pose).astype(np.result_type(np.asarray(pose).dtype, np.float32), copy=False)
 
 
-@dataclass(frozen=True)
-class PerArmUmiBiFlexivTransform:
-    """Two independent transforms from the shared UMI frame to each arm frame."""
+class PerArmFirstFrameTransform:
+    """Per-arm conversion between native BiFlexiv poses and first-frame-relative policy poses.
 
-    left_flexiv_from_umi: np.ndarray
-    right_flexiv_from_umi: np.ndarray
+    The reference frame of each arm is captured from the first state passed after
+    construction or `reset()` — i.e. the episode's first observation — and held
+    fixed for the rest of the episode. Both sides use the native BiFlexiv layout
+    [left_tcp(0-8), right_tcp(9-17), left_gripper(18), right_gripper(19)]; only
+    the TCP coordinates change frame, gripper dims pass through untouched.
+    """
 
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "left_flexiv_from_umi",
-            _rigid_transform(self.left_flexiv_from_umi, name="left_flexiv_from_umi"),
-        )
-        object.__setattr__(
-            self,
-            "right_flexiv_from_umi",
-            _rigid_transform(self.right_flexiv_from_umi, name="right_flexiv_from_umi"),
-        )
+    def __init__(self) -> None:
+        # Per-arm reference pose (first frame) and its inverse, or None until captured.
+        self._left_ref: np.ndarray | None = None
+        self._left_ref_inv: np.ndarray | None = None
+        self._right_ref: np.ndarray | None = None
+        self._right_ref_inv: np.ndarray | None = None
 
-    @classmethod
-    def identity(cls) -> "PerArmUmiBiFlexivTransform":
-        return cls(np.eye(4), np.eye(4))
+    def reset(self) -> None:
+        """Drop the captured reference frames; the next state re-captures them."""
+        self._left_ref = self._left_ref_inv = None
+        self._right_ref = self._right_ref_inv = None
 
-    @classmethod
-    def from_json(cls, path: str | Path) -> "PerArmUmiBiFlexivTransform":
-        with Path(path).open(encoding="utf-8") as file:
-            data = json.load(file)
-        required = {"left_flexiv_from_umi", "right_flexiv_from_umi"}
-        missing = required - set(data)
-        if missing:
-            raise ValueError(f"Calibration file is missing keys: {tuple(sorted(missing))}")
-        return cls(data["left_flexiv_from_umi"], data["right_flexiv_from_umi"])
+    @property
+    def is_captured(self) -> bool:
+        return self._left_ref is not None
 
-    def flexiv_state_to_umi(self, state: np.ndarray) -> np.ndarray:
-        """Convert native BiFlexiv state to per-side-grouped UMI state.
+    def _capture(self, state: np.ndarray) -> None:
+        self._left_ref = _pose9_to_matrix(state[..., :9])
+        self._left_ref_inv = np.linalg.inv(self._left_ref)
+        self._right_ref = _pose9_to_matrix(state[..., 9:18])
+        self._right_ref_inv = np.linalg.inv(self._right_ref)
 
-        Applied to observations heading to the server. Only absolute poses are
-        valid inputs — the server-side DeltaActions transform turns them into
-        deltas against the current state, matching training.
+    def flexiv_to_policy(self, state: np.ndarray) -> np.ndarray:
+        """Convert a native BiFlexiv state/action to first-frame-relative policy space.
+
+        Captures the reference frames on the first call after construction/reset.
+        Only absolute poses are valid inputs — the server-side DeltaActions
+        transform turns them into deltas against the current state, matching
+        training.
         """
         state = np.asarray(state)
         if state.ndim == 0 or state.shape[-1] != 20:
             raise ValueError(f"Expected BiFlexiv state last dimension 20, got {state.shape}")
-        left = _transform_pose9(state[..., :9], np.linalg.inv(self.left_flexiv_from_umi))
-        right = _transform_pose9(state[..., 9:18], np.linalg.inv(self.right_flexiv_from_umi))
+        if not self.is_captured:
+            self._capture(state)
+        left = _transform_pose9(state[..., :9], self._left_ref_inv)
+        right = _transform_pose9(state[..., 9:18], self._right_ref_inv)
         return np.concatenate(
-            (left, state[..., 18:19], right, state[..., 19:20]),
+            (left, right, state[..., 18:19], state[..., 19:20]),
             axis=-1,
         )
 
-    def flexiv_actions_to_umi(self, actions: np.ndarray) -> np.ndarray:
-        return self.flexiv_state_to_umi(actions)
-
-    def umi_actions_to_flexiv(self, actions: np.ndarray) -> np.ndarray:
-        """Convert per-side-grouped UMI actions to native BiFlexiv actions.
+    def policy_to_flexiv(self, actions: np.ndarray) -> np.ndarray:
+        """Convert first-frame-relative policy actions back to native BiFlexiv poses.
 
         Only valid because the policy server's output pipeline includes
         AbsoluteActions: the model emits deltas, the server re-absolutizes them
-        against the current state, and what arrives here is an absolute UMI-
-        frame pose. Applying a rigid transform (with translation) to raw deltas
-        would be wrong — the translation must only act on absolute poses.
+        against the current state, and what arrives here is an absolute
+        first-frame-relative pose. Applying a rigid transform (with translation)
+        to raw deltas would be wrong — the translation must only act on absolute
+        poses.
         """
         actions = np.asarray(actions)
         if actions.ndim == 0 or actions.shape[-1] != 20:
-            raise ValueError(f"Expected UMI actions last dimension 20, got {actions.shape}")
-        left = _transform_pose9(actions[..., :9], self.left_flexiv_from_umi)
-        right = _transform_pose9(actions[..., 10:19], self.right_flexiv_from_umi)
+            raise ValueError(f"Expected policy actions last dimension 20, got {actions.shape}")
+        if not self.is_captured:
+            raise RuntimeError("Reference frames not captured; call flexiv_to_policy with the first state first")
+        left = _transform_pose9(actions[..., :9], self._left_ref)
+        right = _transform_pose9(actions[..., 9:18], self._right_ref)
         return np.concatenate(
-            (left, right, actions[..., 9:10], actions[..., 19:20]),
+            (left, right, actions[..., 18:19], actions[..., 19:20]),
             axis=-1,
         )

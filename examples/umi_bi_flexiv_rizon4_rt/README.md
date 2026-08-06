@@ -1,9 +1,10 @@
 # UMI checkpoint on BiFlexiv Rizon4 RT
 
 This client keeps the robot and action brokers in the native BiFlexiv 20D
-layout while converting WebSocket requests/responses to the UMI training
-layout. The head camera is not connected or sent; only the two wrist cameras
-are used.
+layout while converting WebSocket requests/responses to the policy's
+first-frame-relative coordinate space (see
+`scripts/convert_umi_first_frame_relative.py`). The head camera is not
+connected or sent; only the two wrist cameras are used.
 
 ## Start the UMI policy server
 
@@ -14,9 +15,10 @@ python scripts/serve_policy.py policy:checkpoint \
     --port=8000
 ```
 
-The checkpoint must have been trained with the current UMI camera mapping:
-`base_0_rgb` black/masked, left wrist in the left slot, and right wrist in the
-right slot.
+The checkpoint must have been trained with the current UMI data conventions:
+`base_0_rgb` black/masked, left wrist in the left slot, right wrist in the
+right slot, and states/actions expressed per arm in the episode's first-frame
+TCP frame with the BiFlexiv dim layout (grippers at dims 18-19).
 
 ## Dry-run client
 
@@ -42,26 +44,14 @@ Dry-run suppresses policy actions, but the robot still connects and the normal
 episode reset can move it to the configured start pose. Add
 `--args.no-go-to-start` when the connection itself must not perform that move.
 
-BiFlexiv reports each TCP in its own arm coordinate frame, while the UMI data
-uses a shared Pico4 world frame. Real execution therefore uses two separate
-rigid transforms. An identity template is provided at
-`examples/umi_bi_flexiv_rizon4_rt/frame_calibration_identity.json`:
+## First-frame-relative coordinates
 
-```json
-{
-  "left_flexiv_from_umi": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
-  "right_flexiv_from_umi": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
-}
-```
-
-The identity values mean that the corresponding UMI and Flexiv arm axes and
-origins are assumed equal. Replace them after measuring non-identity offsets.
-Load this file with:
-
-```bash
---args.frame-calibration examples/umi_bi_flexiv_rizon4_rt/frame_calibration_identity.json
-```
+The policy was trained on first-frame-relative data: every training episode
+expresses all of its states/actions in the frame of the episode's first-frame
+TCP pose, per arm. The client reproduces this by capturing each arm's TCP pose
+from the episode's first observation as the reference frame (re-captured on
+every episode reset), converting outgoing states and incoming absolute action
+chunks with that frame. No extrinsic UMI↔Flexiv calibration is required.
 
 The conversion is applied independently to left/right state, policy actions,
-and RTC leftover actions. Real execution is blocked when the calibration file
-is absent.
+and RTC leftover actions.

@@ -5,9 +5,9 @@ State/action format (native BiFlexiv 20D, identical to bi_flexiv_rizon4_rt):
      left_gripper.pos (18), right_gripper.pos (19)]
 
 Unlike examples/bi_flexiv_rizon4_rt, this layer does NOT talk to the policy
-in the model's own space: UMI checkpoint conversion (BiFlexiv native layout +
-per-arm coordinate frames -> UMI per-side-grouped layout + shared Pico4 world
-frame) happens in policy_adapter.BiFlexivUmiPolicyAdapter, so everything below
+in the model's own space: conversion to the policy's first-frame-relative
+coordinate space (per arm, layout unchanged) happens in
+policy_adapter.BiFlexivUmiPolicyAdapter, so everything below
 the broker stays in the native BiFlexiv space the robot driver understands.
 """
 
@@ -59,7 +59,7 @@ class UmiBiFlexivRizon4RTEnvironment(_environment.Environment):
     reads the cameras + robot state fresh, and apply_action() only sends a target
     pose — no observation read. The outer runtime loop owns obs scheduling.
 
-    All policy-space conversion (layout regrouping + per-arm frame transform)
+    All policy-space conversion (per-arm first-frame-relative frame transform)
     happens outside this class, in BiFlexivUmiPolicyAdapter. This layer stays
     strictly in the native BiFlexiv 20D space.
 

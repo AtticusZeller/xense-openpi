@@ -164,6 +164,26 @@ is full fine-tuning, which is misleading. New users should not copy it.
 These will continue to work via the `_CONFIGS_DICT` fallback indefinitely.
 Removing them is **not** a goal of this change.
 
+### UMI first-frame-relative update (2026-08)
+
+`pi05_base_umi_sort_defective_parts_0710` (both the `_examples` YAML and the
+`_CONFIGS` entry) now points at `TacVerse/taccap-g1-sort-defective-parts-0710-ffr`,
+produced by `scripts/convert_umi_first_frame_relative.py` from the raw UMI
+dataset. The conversion bakes in two changes, and `LeRobotUmiDataConfig`
+followed suit:
+
+- Poses are **first-frame-relative**: each episode's states/actions are
+  expressed in the frame of the episode's first-frame TCP pose, per arm.
+- Grippers moved to the trailing dims (BiFlexiv layout
+  `[left_tcp(0-8), right_tcp(9-17), left_gripper(18), right_gripper(19)]`), so
+  the delta mask is now `make_bool_mask(18, -1, -1)` instead of
+  `make_bool_mask(9, -1, 9, -1)`. **Raw per-side-grouped UMI datasets must go
+  through the conversion script before training.**
+
+`LeRobotUmiDataConfig` also gained `use_head_camera` (default `false`): when
+enabled, `observation.images.head` fills the `base_0_rgb` slot instead of the
+default black/masked behavior.
+
 ---
 
 ## Testing
