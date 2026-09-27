@@ -152,10 +152,10 @@ def _build_polymorphic(field_name: str, spec: Any) -> Any:
     cls = _registry.resolve(registry, spec["type"])
 
     # Strip the discriminator and pass the rest as kwargs.
-    return _construct(cls, {k: v for k, v in spec.items() if k != "type"})
+    return construct(cls, {k: v for k, v in spec.items() if k != "type"})
 
 
-def _construct(cls: type, body: dict[str, Any]) -> Any:
+def construct(cls: type, body: dict[str, Any]) -> Any:
     """Instantiate `cls` from a YAML mapping, building nested dataclasses as it goes.
 
     A field whose annotation is a dataclass (e.g. `assets: AssetsConfig`,
@@ -208,7 +208,7 @@ def _coerce(annotation: Any, value: Any) -> Any:
         return value
     if target is _transforms.Group:
         return _build_group(value)
-    return _construct(target, value)
+    return construct(target, value)
 
 
 def _build_group(spec: dict[str, Any]) -> _transforms.Group:
@@ -230,7 +230,7 @@ def _build_transform(spec: Any) -> Any:
     if not isinstance(spec, dict) or "type" not in spec:
         raise ValueError(f"Each transform must be a mapping with a 'type:' key, got {spec!r}")
     cls = _registry.resolve(_registry.TRANSFORMS, spec["type"])
-    return _construct(cls, {k: v for k, v in spec.items() if k != "type"})
+    return construct(cls, {k: v for k, v in spec.items() if k != "type"})
 
 
 def dump(config: TrainConfig, yaml_path: pathlib.Path | str | None = None) -> str:

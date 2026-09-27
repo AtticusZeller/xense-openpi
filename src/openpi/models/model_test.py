@@ -1,3 +1,5 @@
+import dataclasses
+
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -70,6 +72,31 @@ def test_pi05_training_time_rtc_model():
         inference_delay=inference_delay,
     )
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
+
+
+def test_pi05_extract_prefix_hidden():
+    config = pi0_config.Pi0Config(
+        paligemma_variant="dummy", action_expert_variant="dummy", action_dim=8, max_token_len=8, pi05=True
+    )
+    model = config.create(jax.random.key(0))
+    obs = config.fake_obs(2)
+    image_masks = dict(obs.image_masks)
+    image_masks["left_wrist_0_rgb"] = jnp.asarray([True, False])
+    tokenized_prompt_mask = jnp.asarray([[True] * 8, [True] * 5 + [False] * 3])
+    obs = dataclasses.replace(obs, image_masks=image_masks, tokenized_prompt_mask=tokenized_prompt_mask)
+
+    extract = nnx_utils.module_jit(model.extract_prefix_hidden)
+    hidden, mask = extract(obs)
+    num_image_tokens = hidden.shape[1] - 8
+    assert num_image_tokens == 256 * len(obs.images)
+    assert not mask[1, 256:512].any()
+    assert mask[1, 512:num_image_tokens].all()
+    assert (mask[:, num_image_tokens:] == tokenized_prompt_mask).all()
+    assert (hidden[~mask] == 0).all()
+
+    # Each sample's prefix is independent of what else is in the batch.
+    single, _ = extract(jax.tree.map(lambda x: x[1:], obs))
+    assert jnp.allclose(single[0], hidden[1], atol=1e-5)
 
 
 def test_pi0_fast_model():

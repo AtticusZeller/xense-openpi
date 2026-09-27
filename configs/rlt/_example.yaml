@@ -1,0 +1,42 @@
+# RLT phase one (RL-token) - every field with its default. Copy to configs/rlt/<name>.yaml.
+#
+#   uv run scripts/rlt/precompute_prefix.py <name>                   # frozen VLA -> prefix cache
+#   uv run scripts/rlt/train_token.py <name> --exp-name <run>        # cache -> token encoder-decoder
+#
+# The training run deletes the cache once it reaches num_train_steps
+# (--no-delete-cache-on-finish keeps it). Files starting with "_" are docs, not configs.
+
+project_name: openpi-rlt
+seed: 42
+wandb_enabled: true
+
+# Encoder-decoder, as in RLinf's RLTTokenTransformer: one RL token, pre-LN blocks
+# with a GeGLU MLP. The input width is the VLM hidden size, read from the cache.
+model:
+  embed_dim: 2048
+  prefix_seq_len: 1024 # pi05, 3 cameras: 768 image tokens + up to max_token_len (200) prompt tokens
+  num_layers: 2 # per encoder and per decoder
+  num_heads: 8
+  mlp_ratio: 4.0
+  dtype: bfloat16 # matmul compute dtype; params, residual stream and loss stay float32
+  remat: false # recompute blocks in the backward pass to save activation memory
+
+token_training:
+  vla_config: pi05_base_bi_flexiv_pick_up_cube_0824_h100 # VLA TrainConfig (configs/<name>.yaml)
+  vla_checkpoint: ./checkpoints/pi05_base_bi_flexiv_pick_up_cube_0824_h100/run01/59999 # orbax step dir (params/ + assets/)
+  prefix_cache_dir: /data/rlt_cache/pick_up_cube_0824 # ~3.6 MB per cached frame on pi05; use fast local disk
+  repo_id: null # override the VLA config's dataset
+  frame_stride: 1 # cache every n-th frame; 30 Hz neighbours are near-duplicates
+
+  batch_size: 256 # global, split across all local GPUs
+  num_train_steps: 20000
+  peak_lr: 1.0e-4 # AdamW(0.9, 0.95) + grad-norm clip 1.0, warmup then cosine decay to min_lr
+  min_lr: 2.5e-5
+  warmup_steps: 1000
+  num_workers: 8
+  fsdp_devices: 1 # >1 shards params/optimizer state (e.g. on 24 GB cards)
+
+  checkpoint_base_dir: ./checkpoints_rlt # run dir: <base>/<config name>/<exp-name>/token/<step>
+  save_interval: 1000
+  keep_period: 5000
+  log_interval: 50
