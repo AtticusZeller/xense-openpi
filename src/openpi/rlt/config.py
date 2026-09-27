@@ -97,10 +97,74 @@ class TokenTrainingConfig:
 
 
 @dataclasses.dataclass(frozen=True)
+class RLConfig:
+    """Phase two: online chunked-TD actor-critic on top of the frozen RL token.
+
+    Defaults are TacXense's tuned real-robot values (its ``rlt_fast`` config).
+    State and action widths are not configured: they come from the VLA's norm stats.
+    """
+
+    # Actor chunk length C: executed steps per transition, and the TD bootstrap horizon.
+    num_action_chunks: int = 20
+    # Length of the frozen VLA's reference chunk fed to the actor (only the first C steps are used).
+    ref_num_action_chunks: int = 50
+
+    # Heads: ReLU MLPs, LayerNorm on the critic only (TacXense architecture.md 4.51).
+    actor_hidden_dims: tuple[int, ...] = (256, 256)
+    critic_hidden_dims: tuple[int, ...] = (256, 256)
+    num_q_heads: int = 2
+    actor_layer_norm: bool = False
+    critic_layer_norm: bool = True
+
+    actor_lr: float = 3e-4
+    critic_lr: float = 3e-4
+    # Global-norm clip, applied to actor and critic separately.
+    max_grad_norm: float = 10.0
+    # Per-step discount; the bootstrap is discounted by gamma**num_action_chunks.
+    gamma: float = 0.99
+    # Target-critic soft-update rate, applied after every critic update.
+    tau: float = 0.005
+    # Actor objective: -q_weight * Q1(s, pi(s)) + bc_weight * MSE(pi(s), reference or human action).
+    q_weight: float = 0.1
+    bc_weight: float = 5.0
+    # Probability of zeroing the actor's reference input during training.
+    reference_dropout_prob: float = 0.5
+    # Fixed std of the Gaussian actor in normalized action space.
+    fixed_std: float = 0.002
+    # Critic updates per actor update.
+    critic_actor_ratio: int = 2
+
+    batch_size: int = 256
+    # Replay capacity in transitions (one transition = one C-step window).
+    buffer_size: int = 6000
+    # Labeled critical phases are cut into C-step windows starting every `replay_stride` env steps.
+    replay_stride: int = 2
+    # Training (and actor execution) starts once replay holds this many transitions.
+    warm_up: int = 250
+    # Critic updates earned per committed transition.
+    utd: int = 5
+
+    def __post_init__(self) -> None:
+        for name in ("actor_hidden_dims", "critic_hidden_dims"):  # YAML gives lists
+            object.__setattr__(self, name, tuple(getattr(self, name)))
+        if self.num_action_chunks > self.ref_num_action_chunks:
+            raise ValueError("num_action_chunks must be <= ref_num_action_chunks.")
+        if self.num_q_heads < 2:
+            raise ValueError("num_q_heads must be >= 2 for clipped double-Q.")
+        if self.fixed_std <= 0:
+            raise ValueError("fixed_std must be positive.")
+        if min(self.critic_actor_ratio, self.replay_stride, self.warm_up, self.utd) < 1:
+            raise ValueError("critic_actor_ratio, replay_stride, warm_up and utd must be >= 1.")
+        if self.buffer_size < self.warm_up:
+            raise ValueError("buffer_size must cover warm_up transitions.")
+
+
+@dataclasses.dataclass(frozen=True)
 class RLTConfig:
     name: str
     token_training: TokenTrainingConfig
     model: RLTModelConfig = dataclasses.field(default_factory=RLTModelConfig)
+    rl: RLConfig = dataclasses.field(default_factory=RLConfig)
 
     project_name: str = "openpi-rlt"
     # Supplied on the CLI.
