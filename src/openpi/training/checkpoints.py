@@ -75,6 +75,16 @@ def save_state(
         if norm_stats is not None and data_config.asset_id is not None:
             _normalize.save(directory / data_config.asset_id, norm_stats)
 
+    save_train_state(checkpoint_manager, state, step, save_assets)
+
+
+def save_train_state(
+    checkpoint_manager: ocp.CheckpointManager,
+    state: training_utils.TrainState,
+    step: int,
+    save_assets: Callback,
+):
+    """Save `state` with inference params as a separate item; `save_assets` writes into `<step>/assets`."""
     # Split params that can be used for inference into a separate item.
     with at.disable_typechecking():
         train_state, params = _split_params(state)
