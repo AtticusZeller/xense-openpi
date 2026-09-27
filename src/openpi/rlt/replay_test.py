@@ -1,0 +1,101 @@
+import numpy as np
+import pytest
+
+from openpi.rlt import critical_trace
+from openpi.rlt import replay as _replay
+from openpi.rlt import tacxense_reference
+
+Z, S, A, C, R = 4, 3, 2, 3, 5
+
+
+def _features(i):
+    return {
+        "z_rl": np.full(Z, i, np.float32),
+        "state": np.full(S, i, np.float32),
+        "proprio": np.zeros(S, np.float32),
+        "ref_chunk": np.zeros((R, A), np.float32),
+    }
+
+
+def _buffer(capacity=4, seed=0):
+    return _replay.ReplayBuffer(
+        capacity, z_dim=Z, state_dim=S, action_dim=A, num_action_chunks=C, ref_num_action_chunks=R, seed=seed
+    )
+
+
+def _row(i, human=(False, True, False)):
+    human = np.asarray(human)
+    return {
+        "curr_obs": _features(i),
+        "next_obs": _features(i + 1),
+        "actions": np.full((C, A), i, np.float32),
+        "chunk_rewards": np.zeros(C, np.float32),
+        "intervention_mask": human,
+        "action_source": np.where(human, _replay.SOURCE_HUMAN, _replay.SOURCE_VLA),
+        "terminated": False,
+        "success": True,
+        "actor_enabled": False,
+        "episode_id": 0,
+        "round_id": 0,
+    }
+
+
+def test_fifo_sampling_and_checkpoint_roundtrip():
+    buffer = _buffer()
+    for i in range(6):
+        buffer.add(_row(i))
+    assert len(buffer) == 4
+    batch = buffer.sample(64)
+    assert set(np.unique(batch["actions"][:, 0, 0])) <= {2.0, 3.0, 4.0, 5.0}
+    np.testing.assert_array_equal(batch["next_obs"]["z_rl"][:, 0], batch["curr_obs"]["z_rl"][:, 0] + 1)
+    assert buffer.sample(64)["actions"].shape == (4, C, A)
+
+    restored = _buffer(seed=123)
+    restored.load_state_dict(buffer.state_dict())
+    np.testing.assert_equal(restored.sample(8), buffer.sample(8))
+
+
+def test_inconsistent_provenance_is_refused():
+    row = _row(0)
+    row["action_source"] = np.zeros(C, np.int8)
+    with pytest.raises(ValueError, match="disagree"):
+        _buffer().prepare(row)
+
+
+def _trace(length, stride, human_at=()):
+    trace = critical_trace.CriticalTrace(C, stride)
+    source = np.asarray([_replay.SOURCE_HUMAN if i in human_at else _replay.SOURCE_VLA for i in range(length)])
+    trace.extend(
+        np.arange(length, dtype=np.float32)[:, None].repeat(A, 1), np.zeros(length), source, actor_enabled=True
+    )
+    return trace
+
+
+def test_sliding_windows():
+    trace = _trace(10, stride=2, human_at=(8,))
+    assert trace.anchors() == [0, 2, 4, 6, 7]
+    assert trace.missing_feature_indices() == [0, 2, 3, 4, 5, 6, 7, 9, 10]
+    for index in trace.missing_feature_indices():
+        trace.add_features(index, _features(index))
+    trace.set_terminal_reward(1.0)
+    windows = trace.windows()
+    assert [w.terminal for w in windows] == [False] * 4 + [True]
+    last = windows[-1]
+    np.testing.assert_array_equal(last.executed[:, 0], [7, 8, 9])
+    np.testing.assert_array_equal(last.rewards, [0, 0, 1])
+    np.testing.assert_array_equal(last.human, [False, True, False])
+    assert last.next_features["z_rl"][0] == 10
+
+
+def test_short_phase_has_no_windows():
+    assert _trace(C - 1, stride=2).windows() == []
+
+
+@pytest.mark.parametrize(("length", "stride"), [(10, 2), (11, 3), (3, 1), (20, 4)])
+def test_anchors_match_tacxense(length, stride):
+    tacxense_reference.import_tacxense()
+    from tacxense.rlt.critical_trace import CriticalTrace
+
+    reference = CriticalTrace(C, stride=stride)
+    reference.extend(np.zeros((length, A)), np.zeros(length), np.zeros(length, bool), np.zeros(length, np.int8))
+    assert _trace(length, stride).anchors() == reference._sliding_anchor_indices(terminal=True)
