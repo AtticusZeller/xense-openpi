@@ -336,6 +336,38 @@ class Pi0(_model.BaseModel):
         loss = jnp.sum(loss * action_postfix_mask, axis=-1) / (jnp.sum(action_postfix_mask, axis=-1) + 1e-8)
         return loss
 
+    def _prefix_forward(
+        self, observation: _model.Observation
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], _gemma.KVCache]:
+        """Run the LLM over the prefix alone (images + language).
+
+        Returns the final-normed prefix hidden states, the prefix validity mask and
+        the KV cache the suffix denoising steps attend to. Prefix tokens never
+        attend to the suffix, so these hidden states equal the prefix half of a
+        joint prefix+suffix forward.
+        """
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
+        positions = jnp.cumsum(prefix_mask, axis=1) - 1
+        (prefix_out, _), kv_cache = self.PaliGemma.llm(
+            [prefix_tokens, None], mask=prefix_attn_mask, positions=positions
+        )
+        return prefix_out, prefix_mask, kv_cache
+
+    def extract_prefix_hidden(
+        self, observation: _model.Observation
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"]]:
+        """Prefix hidden states and mask the RLT token encoder consumes.
+
+        The prefix has a fixed layout - one 256-token block per camera, then the
+        right-padded prompt - so every token keeps its slot whatever else is in
+        the batch. Padded slots (missing cameras, prompt padding) are zeroed: the
+        LLM leaves arbitrary values there and the mask excludes them anyway.
+        """
+        observation = _model.preprocess_observation(None, observation, train=False)
+        prefix_out, prefix_mask, _ = self._prefix_forward(observation)
+        return jnp.where(prefix_mask[..., None], prefix_out, 0), prefix_mask
+
     @override
     def sample_actions(
         self,
@@ -355,10 +387,7 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        _, prefix_mask, kv_cache = self._prefix_forward(observation)
 
         def get_v_t(x_t, time, obs):  # equivalent to denoise_step in PyTorch
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
@@ -376,7 +405,7 @@ class Pi0(_model.BaseModel):
             assert full_attn_mask.shape == (
                 batch_size,
                 suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
+                prefix_mask.shape[1] + suffix_tokens.shape[1],
             )
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             pos = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
@@ -502,10 +531,7 @@ class Pi0(_model.BaseModel):
         action_prefix_mask = jnp.arange(self.action_horizon)[None, :] < inference_delay[:, None]
 
         # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
-        positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        _, prefix_mask, kv_cache = self._prefix_forward(observation)
 
         def step(carry):
             x_t, time = carry
@@ -530,7 +556,7 @@ class Pi0(_model.BaseModel):
             assert full_attn_mask.shape == (
                 batch_size,
                 suffix_tokens.shape[1],
-                prefix_tokens.shape[1] + suffix_tokens.shape[1],
+                prefix_mask.shape[1] + suffix_tokens.shape[1],
             )
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
             positions = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
