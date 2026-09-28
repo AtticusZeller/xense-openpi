@@ -1,5 +1,7 @@
 """The robot-side RLT session against the server-side collector, with fake hardware."""
 
+import time
+
 import numpy as np
 import pytest
 
@@ -103,7 +105,9 @@ def test_labeled_phase_with_a_takeover_round_trips():
     # boundary, t=4. A takeover over t=6..9 finishes chunk 2 and runs a 2-step continuation;
     # releasing at t=10 ends the reply. B at t=13 labels success, reported when chunk 3 completes
     # at t=14: a 10-step phase. A at t=18 ends the round with an empty segment.
+    started = time.time()
     result, env = _run({1: "B", 13: "B", 18: "A"}, takeover=range(6, 10))
+    finished = time.time()
     rows = result["rows"]
     assert result["metrics"]["success"] == 1
     assert env.t == 18
@@ -116,6 +120,15 @@ def test_labeled_phase_with_a_takeover_round_trips():
     assert human == [[2, 3], [0, 1, 2, 3], [0, 1], []]
     for row in rows:
         np.testing.assert_array_equal(row["action_source"] == _replay.SOURCE_HUMAN, row["intervention_mask"])
+    assert [row["source"] for row in rows] == [
+        _replay.SOURCE_MIXED,
+        _replay.SOURCE_HUMAN,
+        _replay.SOURCE_MIXED,
+        _replay.SOURCE_VLA,
+    ]
+    # One labeled phase: one server-side timestamp, taken while the round ran.
+    assert len({row["timestamp"] for row in rows}) == 1
+    assert started <= rows[0]["timestamp"] <= finished
 
 
 def test_window_needs_a_label_and_discard_drops_labeled_data():

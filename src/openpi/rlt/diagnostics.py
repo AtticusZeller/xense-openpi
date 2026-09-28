@@ -146,6 +146,8 @@ def dump_transitions(path: pathlib.Path, rows: list[dict], **metadata: Any) -> N
         "actor_enabled",
         "episode_id",
         "round_id",
+        "source",
+        "timestamp",
     ):
         payload[key] = np.stack([np.asarray(row[key]) for row in rows])
     for side in ("curr_obs", "next_obs"):

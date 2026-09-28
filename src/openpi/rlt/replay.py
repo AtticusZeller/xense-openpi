@@ -11,8 +11,16 @@ import copy
 import numpy as np
 
 OBS_KEYS = ("z_rl", "state", "proprio", "ref_chunk")
-# Per-step action provenance.
-SOURCE_VLA, SOURCE_ACTOR, SOURCE_HUMAN = 0, 1, 2
+# Per-step action provenance; a chunk mixing two or more of them is MIXED.
+SOURCE_VLA, SOURCE_ACTOR, SOURCE_HUMAN, SOURCE_MIXED = 0, 1, 2, 3
+
+
+def chunk_source(action_source: np.ndarray) -> int:
+    """One provenance code for a whole window: its only per-step source, or MIXED."""
+    kinds = np.unique(np.asarray(action_source))
+    if kinds.size == 0:
+        raise ValueError("action_source marks no executed step.")
+    return SOURCE_MIXED if kinds.size > 1 else int(kinds[0])
 
 
 class ReplayBuffer:
@@ -49,6 +57,9 @@ class ReplayBuffer:
             "actor_enabled": ((), np.bool_),
             "episode_id": ((), np.int64),
             "round_id": ((), np.int64),
+            "source": ((), np.int8),
+            # Server wall clock (Unix s) when the labeled phase became rows; shared by the phase.
+            "timestamp": ((), np.float64),
         }
         self.capacity = capacity
         self._storage = {key: np.zeros((capacity, *shape), dtype) for key, (shape, dtype) in self._fields.items()}
@@ -76,6 +87,8 @@ class ReplayBuffer:
             raise ValueError("Transition holds non-finite values.")
         if not np.array_equal(out["action_source"] == SOURCE_HUMAN, out["intervention_mask"]):
             raise ValueError("action_source and intervention_mask disagree.")
+        if out["source"] != chunk_source(out["action_source"]):
+            raise ValueError("source and action_source disagree.")
         return out
 
     def add(self, row: dict) -> None:

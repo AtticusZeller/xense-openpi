@@ -171,8 +171,15 @@ def test_actor_drives_only_open_windows_after_warm_up(tmp_path):
     act = learner.act
     learner.act = lambda features: acted.append(act(features)) or acted[-1]
     before = len(robot.requests)
-    collector.run_round()
+    actor_rows = collector.run_round()["rows"]
     learner.act = act
+    # Actor steps with the takeover's human steps: MIXED, HUMAN, MIXED, then an actor-only window.
+    assert [int(row["source"]) for row in actor_rows] == [
+        _replay.SOURCE_MIXED,
+        _replay.SOURCE_HUMAN,
+        _replay.SOURCE_MIXED,
+        _replay.SOURCE_ACTOR,
+    ]
     # The two in-window chunks execute the actor's decoded chunk; the others the VLA reference.
     chunks = [m["actions"] for m in robot.requests[before:] if m["op"] == "chunk"]
     assert len(acted) == 2

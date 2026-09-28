@@ -212,6 +212,7 @@ class Collector:
         if not windows:
             return [], f"shorter than one {trace.horizon}-step window"
         space = self.learner.space
+        timestamp = time.time()
         rows = [
             {
                 "curr_obs": window.features,
@@ -225,6 +226,8 @@ class Collector:
                 "actor_enabled": window.actor_enabled,
                 "episode_id": self._episode_id,
                 "round_id": self.learner.counters.rounds,
+                "source": _replay.chunk_source(window.source),
+                "timestamp": timestamp,
                 # For the transition dump only (replay ignores them): what the robot ran, and the
                 # raw VLA reference before any normalization or clipping.
                 "executed_actions": window.executed,

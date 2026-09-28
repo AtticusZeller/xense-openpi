@@ -25,18 +25,21 @@ def _buffer(capacity=4, seed=0):
 
 def _row(i, human=(False, True, False)):
     human = np.asarray(human)
+    action_source = np.where(human, _replay.SOURCE_HUMAN, _replay.SOURCE_VLA)
     return {
         "curr_obs": _features(i),
         "next_obs": _features(i + 1),
         "actions": np.full((C, A), i, np.float32),
         "chunk_rewards": np.zeros(C, np.float32),
         "intervention_mask": human,
-        "action_source": np.where(human, _replay.SOURCE_HUMAN, _replay.SOURCE_VLA),
+        "action_source": action_source,
         "terminated": False,
         "success": True,
         "actor_enabled": False,
         "episode_id": 0,
         "round_id": 0,
+        "source": _replay.chunk_source(action_source),
+        "timestamp": 1790000000.0 + i,
     }
 
 
@@ -60,6 +63,38 @@ def test_inconsistent_provenance_is_refused():
     row["action_source"] = np.zeros(C, np.int8)
     with pytest.raises(ValueError, match="disagree"):
         _buffer().prepare(row)
+
+
+@pytest.mark.parametrize(
+    ("action_source", "expected"),
+    [
+        ([0, 0, 0], _replay.SOURCE_VLA),
+        ([1, 1, 1], _replay.SOURCE_ACTOR),
+        ([2, 2, 2], _replay.SOURCE_HUMAN),
+        ([0, 2, 0], _replay.SOURCE_MIXED),
+        ([1, 2, 2], _replay.SOURCE_MIXED),
+    ],
+)
+def test_chunk_source(action_source, expected):
+    assert _replay.chunk_source(np.asarray(action_source, np.int8)) == expected
+
+
+def test_chunk_source_disagreeing_with_the_steps_is_refused():
+    row = _row(0)  # VLA and human steps: MIXED
+    row["source"] = _replay.SOURCE_VLA
+    with pytest.raises(ValueError, match="source and action_source disagree"):
+        _buffer().prepare(row)
+
+
+def test_checkpoint_roundtrip_keeps_source_and_timestamp():
+    buffer = _buffer()
+    for i in range(3):
+        buffer.add(_row(i, human=(False, False, False) if i == 1 else (False, True, False)))
+    restored = _buffer()
+    restored.load_state_dict(buffer.state_dict())
+    storage = restored.state_dict()["storage"]
+    assert storage["source"].tolist() == [_replay.SOURCE_MIXED, _replay.SOURCE_VLA, _replay.SOURCE_MIXED]
+    assert storage["timestamp"].tolist() == [1790000000.0, 1790000001.0, 1790000002.0]
 
 
 def _trace(length, stride, human_at=()):
