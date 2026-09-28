@@ -128,16 +128,11 @@ class Learner:
             )
             self.counters.critic_updates += 1
             if self.counters.critic_updates % self.config.critic_actor_ratio == 0:
-                config = self.config
-                # Counts actor updates, not critic updates, as in TacXense.
-                bc_weight, q_weight = config.actor_weight_schedule.weights(
-                    self.counters.actor_updates, bc_weight=config.bc_weight, q_weight=config.q_weight
-                )
                 self.actor, self.actor_opt, actor_info = self._actor_step(
-                    self.actor, self.actor_opt, self.critic, batch, actor_rng, bc_weight, q_weight
+                    self.actor, self.actor_opt, self.critic, batch, actor_rng
                 )
                 self.counters.actor_updates += 1
-                info = {**info, **actor_info, "bc_weight": bc_weight, "q_weight": q_weight}
+                info = {**info, **actor_info}
             infos.append({key: float(value) for key, value in jax.device_get(info).items()})
         return infos
 
@@ -159,7 +154,7 @@ class Learner:
         target = optax.incremental_update(critic, target, self.config.tau)
         return critic, target, opt, {**info, "critic_grad_norm": optax.global_norm(grads)}
 
-    def _actor_step_impl(self, actor, opt, critic, batch, rng, bc_weight, q_weight):
+    def _actor_step_impl(self, actor, opt, critic, batch, rng):
         def loss_fn(actor):
             return td.actor_loss(
                 nnx.merge(self._actor_def, actor),
@@ -167,11 +162,9 @@ class Learner:
                 self.space,
                 batch,
                 rng,
-                q_weight=q_weight,
-                bc_weight=bc_weight,
+                q_weight=self.config.q_weight,
+                bc_weight=self.config.bc_weight,
                 reference_dropout_prob=self.config.reference_dropout_prob,
-                smooth_weight=self.config.smooth_weight,
-                smooth_order_weights=self.config.smooth_order_weights,
             )
 
         (_, info), grads = jax.value_and_grad(loss_fn, has_aux=True)(actor)
