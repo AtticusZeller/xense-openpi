@@ -126,6 +126,31 @@ def test_window_needs_a_label_and_discard_drops_labeled_data():
     assert result["metrics"]["discards"] == 1
 
 
+def test_round_end_waits_for_a_pending_label():
+    # Window opens at t=4; Y at t=6 labels chunk [4, 8) failure; A at t=7 must not cut that chunk:
+    # the round ends at t=8 together with the label, and the 4-step phase becomes one terminal row.
+    result, env = _run({1: "B", 6: "Y", 7: "A"})
+    assert env.t == 8
+    assert result["metrics"]["failure"] == 1
+    rows = result["rows"]
+    assert [int(row["curr_obs"]["z_rl"][0]) for row in rows] == [4]
+    assert [row["terminated"] for row in rows] == [True]
+    np.testing.assert_array_equal(rows[0]["chunk_rewards"], [0, 0, 0, 0])
+
+
+def test_round_end_after_a_release_waits_for_the_restarted_chunk():
+    # Window opens at t=4 inside a takeover over t=4..10. Y at t=9 labels the human segment [8, 12),
+    # A at t=10 is deferred, and the release at t=11 cuts that segment short: the label (and the
+    # round end) wait for the restarted chunk [11, 15). An 11-step phase, anchors 0, 2, 4, 6 and the
+    # terminal-aligned 7.
+    result, env = _run({1: "B", 9: "Y", 10: "A"}, takeover=range(4, 11))
+    assert env.t == 15
+    assert result["metrics"]["failure"] == 1
+    rows = result["rows"]
+    assert [int(row["curr_obs"]["z_rl"][0]) for row in rows] == [4, 6, 8, 10, 11]
+    assert [row["terminated"] for row in rows] == [False, False, False, False, True]
+
+
 def test_robot_refuses_the_actor_outside_a_window():
     env = FakeEnv()
     session = rlt_mode.Session(env, FakeController(env, {}), step_dt=None, takeover_motion=lambda *m: m)

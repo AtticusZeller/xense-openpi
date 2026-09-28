@@ -6,7 +6,9 @@ and executes the chunks it is sent. Pico4 is required: the grips take over the
 arms (a held grip arms the takeover; it starts once a controller moves past the
 server's threshold), and the face buttons are the operator's controls:
 
-- ``A``: at the reset gate, start the round; during a round, end it (the arms home).
+- ``A``: at the reset gate, start the round; during a round, end it (the arms home). With a
+  success/failure label pending, the round ends only after that label is reported, so A
+  never drops a labeled phase.
 - ``B``: open a recording window for the next chunk; pressed while one is open, label it success.
 - ``Y``: label the open window failure.
 - ``X``: discard the round's labeled data and close the window.
@@ -62,6 +64,10 @@ class Operator:
             self.recording_requested = False
             self.label = None
         logging.info("Pico4 %s: recording_requested=%s label=%s", button, self.recording_requested, self.label)
+
+    def ends_round(self) -> bool:
+        """Whether A ends the round now: a pending label defers it until the labeled unit reports."""
+        return self.round_end and self.label is None
 
     def new_round(self) -> None:
         self.__init__()
@@ -179,7 +185,7 @@ class Session:
                 # Continuation segments only ever run human steps.
                 released = self.controller.consume_release_event() or (index > 0 and not active)
                 self._drain_buttons()
-                if op.round_end or op.discard or released:
+                if op.ends_round() or op.discard or released:
                     break
                 if from_actor and not active and not recording:
                     # The server only routes the actor into open windows; never run it anywhere else.
@@ -198,7 +204,7 @@ class Session:
                         captures.append({"step": self._window_steps, "obs": self.observe()})
                 if self.step_dt is not None:
                     time.sleep(max(0.0, self.step_dt - (time.monotonic() - started)))
-            complete = len(executed) == steps and not (op.round_end or op.discard)
+            complete = len(executed) == steps and not (op.ends_round() or op.discard)
             label = op.label if recording and complete else None
             if label is not None:
                 op.label = None
@@ -213,12 +219,13 @@ class Session:
                     "human": np.asarray(human, bool),
                     "recording": recording,
                     "label": label,
-                    "round_end": op.round_end,
+                    # A deferred by a pending label is reported with (or after) that label.
+                    "round_end": op.ends_round(),
                     "discard": op.discard,
                 }
             )
             op.discard = False
-            if op.round_end or released or label is not None or not human or not human[-1]:
+            if op.ends_round() or released or label is not None or not human or not human[-1]:
                 break
         else:
             raise RuntimeError(

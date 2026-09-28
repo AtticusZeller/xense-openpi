@@ -273,7 +273,7 @@ mamba run -n lerobot-xense python -m examples.bi_flexiv_rizon4_rt.main \
 
 | Input | Effect |
 |---|---|
-| `A` | At the reset gate: start the round. During a round: end it (the arms home, the server trains) |
+| `A` | At the reset gate: start the round. During a round: end it (the arms home, the server trains); with a label pending, first the labeled unit runs out and reports it |
 | `B` | Open a recording window from the next chunk; pressed while one is open: label it **success** |
 | `Y` | Label the open window **failure** |
 | `X` | Discard the round's labeled data |
