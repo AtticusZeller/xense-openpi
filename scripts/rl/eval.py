@@ -47,17 +47,20 @@ def main() -> None:
         parser.error("--actor only applies to --arm rlt")
     if args.trials < 1:
         parser.error("--trials must be at least 1")
+    # A single path component: with --overwrite, anything else could rmtree outside eval/.
+    if not args.eval_name or "/" in args.eval_name or args.eval_name in (".", ".."):
+        parser.error("--eval-name must be a plain name, without '/'")
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", force=True)
 
     config = dataclasses.replace(_rlt_config.get_config(args.config), exp_name=args.exp_name)
     out_dir = config.checkpoint_dir / "eval" / args.eval_name
+    if out_dir.exists() and not args.overwrite:
+        raise FileExistsError(f"{out_dir} exists; pass --overwrite or choose another --eval-name.")
+    # Load before touching out_dir, so a bad --actor leaves no empty eval directory behind.
+    arm = _eval_arm.create_arm(config, args.arm, args.actor)
     if out_dir.exists():
-        if not args.overwrite:
-            raise FileExistsError(f"{out_dir} exists; pass --overwrite or choose another --eval-name.")
         shutil.rmtree(out_dir)
     out_dir.mkdir(parents=True)
-
-    arm = _eval_arm.create_arm(config, args.arm, args.actor)
     run = wandb.init(
         project=config.project_name,
         name=f"{config.name}/{config.exp_name}/eval/{args.eval_name}",

@@ -35,7 +35,7 @@ scripts/rl/<algo>/  各算法的入口；scripts/rl/eval.py 是评测入口
 |---|---|
 | `env/protocol.py` | 服务器端的机器人连接 `RemoteEnv`：监听、握手时校验协议与维度、逐请求收发，断线抛 `EnvConnectionLostError` |
 | `env/session.py` | `RoundSession`：一轮的 reset 与 chunk 往返，把机器人回报的各段翻译成窗口事件（开窗、无标签关窗、关窗的标签、作废），并给出机器人为下一个 chunk 锁定的窗口状态。训练采集与评测对窗口的理解都来自这里 |
-| `eval.py` | `Evaluation`：一次评测一个 arm，一个有标签的窗口是一个 trial，按轮写 `trials.jsonl`，攒够目标数就停；`Arm` 是评测对策略的唯一要求 |
+| `eval.py` | `Evaluation`：一次评测一个 arm，一个有标签的窗口是一个 trial，按轮写 `trials.jsonl`，攒够目标数就停；策略只需满足 `Arm`：名字、动作空间（握手用的维度）和按窗口状态出 chunk |
 | `run_logger.py` | `RunLogger`：按轴记 W&B，并镜像到 `events.jsonl`；日志出错只警告一次，不打断机器人循环 |
 | `vla/frozen.py` | `FrozenVLA` 与 `resolve()`：按 TrainConfig 名和 checkpoint 加载 VLA，norm stats 只取 checkpoint 自带的 `assets/`；与 serving 一致的输入、输出 transform；VLA 身份（配置名、参数与 norm stats 指纹），供 resume 和 serving 校验 |
 | `vla/action_space.py` | `ActionSpace`：VLA 的动作表示。TCP 写成相对当前 state 的 delta，夹爪保持绝对值，按 VLA 的 quantile stats 归一化并裁到 `[-1, 1]`，rot6d 正交化；`encode` / `decode` 在 JAX 里批量、可微 |
@@ -162,6 +162,6 @@ experiments.md   原始记录 → 结果分析 → 下一步（未确认）
 3. 代码：`algos/<algo>/` 放模型、loss、replay 行格式、采集逻辑、配置 dataclass 和 serving 适配；
    `configs/rl/<algo>/_example.yaml`；`scripts/rl/<algo>/` 放入口。
 4. 测试：用固定种子与参考实现做数值对照（参照 RLT 的 `tacxense_reference.py`），`layering_test.py` 保持通过。
-5. 评测：在 `algos/<algo>/` 实现满足 `eval.Arm` 的 arm，并让 `scripts/rl/eval.py` 能按配置构造它；只有窗口内才返回
-   `"actor"` source。
+5. 评测：在 `algos/<algo>/` 实现满足 `eval.Arm` 的 arm，只有窗口内才返回 `"actor"` source。`scripts/rl/eval.py` 目前
+   只接受 RLT 配置、直接构造 RLT 的 arm，接第二个算法时要让它按配置类型选择 arm。
 6. 本文档：第 2 节加模块表，第 3 节加 spec 映射，第 4、5 节补上与 RLT 不同的数据流和操作流程。

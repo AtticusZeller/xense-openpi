@@ -28,12 +28,14 @@ import numpy as np
 from openpi.rl import run_logger as _run_logger
 from openpi.rl.env import protocol as _protocol
 from openpi.rl.env import session as _session
+from openpi.rl.vla import action_space as _action_space
 
 AXES = ("round", "trial")
 
 
 class Arm(Protocol):
     name: str
+    space: _action_space.ActionSpace  # the robot's state and action widths, for the session handshake
 
     def act(self, obs: dict[str, Any], *, window_open: bool) -> tuple[np.ndarray, str]:
         """A chunk of absolute robot actions and its source; the robot runs "actor" only inside open windows."""

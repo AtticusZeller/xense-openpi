@@ -18,10 +18,10 @@ def test_rlt_arm_drives_only_open_windows_and_vla_arm_never(tmp_path):
     vla = eval_arm.RLTArm(collector.extractor, None, horizon=collector_test.C)
     assert (rlt.name, vla.name) == ("rlt", "vla")
 
-    # Inside a window the rlt arm runs the actor's mean (no exploration noise), decoded to absolute actions.
+    # Inside a window the rlt arm runs the learner's deterministic mean chunk, decoded to absolute actions.
     actions, source = rlt.act(obs, window_open=True)
-    batched = {key: jnp.asarray(features[key])[None] for key in ("z_rl", "state", "proprio", "ref_chunk")}
-    np.testing.assert_allclose(actions, learner.space.decode(actor(batched), batched["state"])[0], atol=1e-6)
+    expected = learner.space.decode(jnp.asarray(learner.mean(features))[None], jnp.asarray(features["state"])[None])[0]
+    np.testing.assert_allclose(actions, expected, atol=1e-6)
     assert source == "actor"
 
     # Everywhere else both arms run the first C steps of the VLA reference, as training does.
