@@ -1,7 +1,7 @@
-"""RLT mode: serve this bench to an online RLT training server (``openpi.rlt.env_protocol``).
+"""RLT mode: serve this bench to an online RLT training server (``openpi.rl.env.protocol``).
 
 Entered from ``main.py`` with ``--args.rlt``. The training server
-(``scripts/rlt/train_rl.py``) listens; this process dials ``--args.host/--args.port``
+(``scripts/rl/rlt/train_rl.py``) listens; this process dials ``--args.host/--args.port``
 and executes the chunks it is sent. Pico4 is required: the grips take over the
 arms (a held grip arms the takeover; it starts once a controller moves past the
 server's threshold), and the face buttons are the operator's controls:
@@ -34,7 +34,7 @@ import numpy as np
 if TYPE_CHECKING:
     from examples.bi_flexiv_rizon4_rt.main import Args
 
-PROTOCOL = "openpi-rlt/1"  # openpi.rlt.env_protocol.PROTOCOL; not imported to keep the robot host light
+PROTOCOL = "openpi-rlt/1"  # openpi.rl.env.protocol.PROTOCOL; not imported to keep the robot host light
 STATE_DIM = ACTION_DIM = 20
 # Takeover continuations buffered in one reply before refusing to go on.
 _MAX_SEGMENTS = 256

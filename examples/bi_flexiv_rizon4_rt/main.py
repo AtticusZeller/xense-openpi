@@ -287,7 +287,7 @@ class Args:
     pico4_pos_sensitivity: float = 1.0
     pico4_ori_sensitivity: float = 1.0
 
-    # Online RLT collection: serve this bench to scripts/rlt/train_rl.py at --host/--port instead of
+    # Online RLT collection: serve this bench to scripts/rl/rlt/train_rl.py at --host/--port instead of
     # querying a policy server. Needs --pico4-intervention (grips take over, face buttons label).
     rlt: bool = False
 

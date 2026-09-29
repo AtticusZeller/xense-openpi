@@ -137,6 +137,8 @@ celerybeat.pid
 .env
 .venv
 env/
+# The online-RL robot-connection package, not a virtualenv.
+!src/openpi/rl/env/
 venv/
 ENV/
 env.bak/

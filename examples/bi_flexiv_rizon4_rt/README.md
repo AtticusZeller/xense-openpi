@@ -260,7 +260,7 @@ examples/bi_flexiv_rizon4_rt/
 
 #### Online RLT collection
 
-`--args.rlt` serves this bench to an RLT training server (`scripts/rlt/train_rl.py`) instead
+`--args.rlt` serves this bench to an RLT training server (`scripts/rl/rlt/train_rl.py`) instead
 of querying a policy server; `--args.host/--args.port` point at the training server's
 `rl.listen` address. Pico4 is required:
 

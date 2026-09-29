@@ -33,9 +33,9 @@ class Checkpoint:
 
 @dataclasses.dataclass
 class RLT:
-    """Serve a trained RLT actor (openpi.policies.rlt_policy) on top of its frozen VLA."""
+    """Serve a trained RLT actor (openpi.rl.algos.rlt.serving) on top of its frozen VLA."""
 
-    # RLT config name (configs/rlt/<name>.yaml).
+    # RLT config name (configs/rl/rlt/<name>.yaml).
     config: str
     # Run name the actor was trained under (train_rl.py --exp-name).
     exp_name: str
@@ -106,8 +106,8 @@ def create_policy(args: Args) -> _policy.BasePolicy:
     """Create a policy from the given arguments."""
     match args.policy:
         case RLT():
-            from openpi.policies import rlt_policy
-            from openpi.rlt import config as _rlt_config
+            from openpi.rl.algos.rlt import config as _rlt_config
+            from openpi.rl.algos.rlt import serving as rlt_policy
 
             config = dataclasses.replace(_rlt_config.get_config(args.policy.config), exp_name=args.policy.exp_name)
             return rlt_policy.create_rlt_policy(config, args.policy.dir, use_actor=args.policy.use_actor)

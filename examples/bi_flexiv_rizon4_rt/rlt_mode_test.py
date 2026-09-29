@@ -6,8 +6,8 @@ import numpy as np
 import pytest
 
 from examples.bi_flexiv_rizon4_rt import rlt_mode
-from openpi.rlt import collector_test
-from openpi.rlt import replay as _replay
+from openpi.rl.algos.rlt import collector_test
+from openpi.rl.algos.rlt import replay as _replay
 
 C = collector_test.C
 
