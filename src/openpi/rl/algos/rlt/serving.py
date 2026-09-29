@@ -63,6 +63,40 @@ class RLTPolicy(_base_policy.BasePolicy):
         return {"rlt": True}
 
 
+def resolve_rl_checkpoint(config: _rlt_config.RLTConfig, rl_checkpoint: pathlib.Path | str | None) -> pathlib.Path:
+    """``rl_checkpoint`` - an ``rl/<round>`` dir or a round's weight snapshot - or the run's latest round."""
+    if rl_checkpoint is None:
+        rounds = [p for p in config.rl_checkpoint_dir.iterdir() if p.name.isdigit()]
+        if not rounds:
+            raise FileNotFoundError(f"No RL checkpoint under {config.rl_checkpoint_dir}.")
+        rl_checkpoint = max(rounds, key=lambda p: int(p.name))
+    return pathlib.Path(rl_checkpoint)
+
+
+def load_extractor(config: _rlt_config.RLTConfig) -> tuple[_features.FeatureExtractor, dict[str, Any]]:
+    """The config's frozen VLA and token encoder, and the binding a trained actor must carry to run on them."""
+    rl, tt = config.rl, config.token_training
+    frozen = _vla.resolve(tt.vla_config, tt.vla_checkpoint, repo_id=tt.repo_id)
+    token_checkpoint = _features.resolve_token_checkpoint(rl.token_checkpoint or config.token_checkpoint_dir)
+    extractor = _features.FeatureExtractor.from_vla(frozen, token_checkpoint, rl, num_steps=rl.num_steps)
+    return extractor, {"vla": frozen.vla_identity(), "token_checkpoint": str(token_checkpoint)}
+
+
+def load_trained_actor(
+    config: _rlt_config.RLTConfig,
+    rl_checkpoint: pathlib.Path,
+    extractor: _features.FeatureExtractor,
+    binding: dict[str, Any],
+) -> mlp_policy.Actor:
+    """The actor of ``rl_checkpoint``, refused unless it was trained on ``binding``'s VLA and token encoder."""
+    actor, saved = _learner.load_actor(rl_checkpoint, config.rl, extractor.space, z_dim=extractor.z_dim)
+    if saved.get("vla") != binding["vla"]:
+        raise ValueError(f"{rl_checkpoint} was trained against a different VLA checkpoint.")
+    if saved.get("token_checkpoint") != binding["token_checkpoint"]:
+        raise ValueError(f"{rl_checkpoint} was trained with token checkpoint {saved.get('token_checkpoint')}.")
+    return actor
+
+
 def create_rlt_policy(
     config: _rlt_config.RLTConfig, rl_checkpoint: pathlib.Path | str | None = None, *, use_actor: bool = True
 ) -> RLTPolicy:
@@ -70,21 +104,8 @@ def create_rlt_policy(
 
     Uses the config's VLA and token model.
     """
-    rl = config.rl
-    if rl_checkpoint is None:
-        rounds = [p for p in config.rl_checkpoint_dir.iterdir() if p.name.isdigit()]
-        if not rounds:
-            raise FileNotFoundError(f"No RL checkpoint under {config.rl_checkpoint_dir}.")
-        rl_checkpoint = max(rounds, key=lambda p: int(p.name))
-    rl_checkpoint = pathlib.Path(rl_checkpoint)
-    tt = config.token_training
-    frozen = _vla.resolve(tt.vla_config, tt.vla_checkpoint, repo_id=tt.repo_id)
-    token_checkpoint = _features.resolve_token_checkpoint(rl.token_checkpoint or config.token_checkpoint_dir)
-    extractor = _features.FeatureExtractor.from_vla(frozen, token_checkpoint, rl, num_steps=rl.num_steps)
-    actor, binding = _learner.load_actor(rl_checkpoint, rl, extractor.space, z_dim=extractor.z_dim)
-    if binding.get("vla") != frozen.vla_identity():
-        raise ValueError(f"{rl_checkpoint} was trained against a different VLA checkpoint.")
-    if binding.get("token_checkpoint") != str(token_checkpoint):
-        raise ValueError(f"{rl_checkpoint} was trained with token checkpoint {binding.get('token_checkpoint')}.")
+    rl_checkpoint = resolve_rl_checkpoint(config, rl_checkpoint)
+    extractor, binding = load_extractor(config)
+    actor = load_trained_actor(config, rl_checkpoint, extractor, binding)
     logging.info("Serving RLT actor %s (actor %s by default)", rl_checkpoint, "on" if use_actor else "off")
     return RLTPolicy(extractor, actor, use_actor=use_actor)

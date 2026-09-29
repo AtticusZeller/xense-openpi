@@ -281,3 +281,6 @@ mamba run -n lerobot-xense python -m examples.bi_flexiv_rizon4_rt.main \
 
 Only labeled windows become training data. Once replay has warmed up, the server executes the
 RL actor inside open windows and the VLA everywhere else.
+
+The same mode serves a labeled evaluation server (`scripts/rl/eval.py`): the buttons are unchanged,
+each labeled window is one trial, `X` voids the round's trials, and nothing trains between rounds.

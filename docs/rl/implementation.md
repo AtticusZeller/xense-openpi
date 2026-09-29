@@ -7,17 +7,19 @@
 
 ```text
 src/openpi/rl/
-  env/            机器人连接：服务器与机器人端之间的会话协议
+  env/            机器人连接：服务器与机器人端之间的会话协议，以及一轮会话的窗口事件
   vla/            冻结 VLA：checkpoint 解析、预处理、身份，以及 VLA 的动作表示
-  algos/<algo>/   算法私有的模型、loss、replay、采集逻辑、配置和 serving
+  eval.py         冻结策略的带标签评测
+  run_logger.py   W&B 与 events.jsonl 的分轴日志
+  algos/<algo>/   算法私有的模型、loss、replay、采集逻辑、配置、serving 与评测 arm
 configs/rl/<algo>/  各算法的 YAML
-scripts/rl/<algo>/  各算法的入口
+scripts/rl/<algo>/  各算法的入口；scripts/rl/eval.py 是评测入口
 ```
 
 依赖只能从算法指向共享层：
 
-- `algos/*` 可以依赖 `env/`、`vla/` 和 openpi 的其余部分；
-- `env/`、`vla/` 不依赖 `algos/`；
+- `algos/*` 可以依赖共享层和 openpi 的其余部分；
+- 共享层（`env/`、`vla/`、`eval.py`、`run_logger.py`）不依赖 `algos/`；
 - `src/openpi` 里 `rl/` 之外的模块不依赖 `openpi.rl`，只有 `scripts/`、`examples/` 直接调用它。
 
 `src/openpi/rl/layering_test.py` 检查后两条，只查非测试模块：共享层的测试可以借用算法的参照实现，例如 action space
@@ -32,6 +34,9 @@ scripts/rl/<algo>/  各算法的入口
 | 模块 | 职责 |
 |---|---|
 | `env/protocol.py` | 服务器端的机器人连接 `RemoteEnv`：监听、握手时校验协议与维度、逐请求收发，断线抛 `EnvConnectionLostError` |
+| `env/session.py` | `RoundSession`：一轮的 reset 与 chunk 往返，把机器人回报的各段翻译成窗口事件（开窗、无标签关窗、关窗的标签、作废），并给出机器人为下一个 chunk 锁定的窗口状态。训练采集与评测对窗口的理解都来自这里 |
+| `eval.py` | `Evaluation`：一次评测一个 arm，一个有标签的窗口是一个 trial，按轮写 `trials.jsonl`，攒够目标数就停；`Arm` 是评测对策略的唯一要求 |
+| `run_logger.py` | `RunLogger`：按轴记 W&B，并镜像到 `events.jsonl`；日志出错只警告一次，不打断机器人循环 |
 | `vla/frozen.py` | `FrozenVLA` 与 `resolve()`：按 TrainConfig 名和 checkpoint 加载 VLA，norm stats 只取 checkpoint 自带的 `assets/`；与 serving 一致的输入、输出 transform；VLA 身份（配置名、参数与 norm stats 指纹），供 resume 和 serving 校验 |
 | `vla/action_space.py` | `ActionSpace`：VLA 的动作表示。TCP 写成相对当前 state 的 delta，夹爪保持绝对值，按 VLA 的 quantile stats 归一化并裁到 `[-1, 1]`，rot6d 正交化；`encode` / `decode` 在 JAX 里批量、可微 |
 
@@ -45,9 +50,10 @@ RLT（`algos/rlt/`）：
 | `mlp_policy.py`、`td.py` | actor 与 twin-Q critic；chunked TD critic loss 和带 BC 项的 actor loss |
 | `critical_trace.py`、`replay.py` | 关键阶段的逐步执行记录，打标签后切成 sliding C-step transition；replay ring buffer |
 | `learner.py` | actor、critic、target、replay 与 UTD 节奏；checkpoint 与 resume |
-| `collector.py` | 一轮在线采集：按 chunk 驱动机器人，决定由 VLA 还是 actor 驾驶，把打过标签的关键阶段变成 replay 行 |
-| `diagnostics.py` | W&B 三个轴与 `events.jsonl`、transition dump、动作诊断 |
-| `serving.py` | 把训练好的 actor 接到 `scripts/serve_policy.py policy:rlt` |
+| `collector.py` | 一轮在线采集：在会话事件上决定由 VLA 还是 actor 驾驶，把打过标签的关键阶段变成 replay 行 |
+| `diagnostics.py` | RLT 的三个日志轴、transition dump、动作诊断、warm_up 估计 |
+| `serving.py` | 按配置加载 VLA、token encoder 与训练好的 actor（带身份校验），接到 `scripts/serve_policy.py policy:rlt` |
+| `eval_arm.py` | 评测 arm：`rlt` 在窗口内跑 actor 均值、窗口外跑 VLA；`vla` 全程跑 VLA |
 | `tacxense_reference.py` | 测试用：导入 TacXense 的 RLT 实现做数值对照 |
 
 入口：`scripts/rl/rlt/precompute_prefix.py`、`train_token.py`（phase one），`train_rl.py`（phase two）。机器人端：
@@ -94,6 +100,16 @@ chunk   服务器：对当前观测做一次 VLA 前向，得到参考 chunk 与
 W&B：project 默认 `openpi-rlt`，run 名 `<配置名>/<exp-name>/rl`，三个轴分别是 `round/*`、`update/*`（每次梯度更新）
 和 `chunk/*`（每个执行的 chunk，含 actor 输出与 VLA 参考的对比）。
 
+评测（`scripts/rl/eval.py`）用同一个机器人端模式和同一套协议，服务器换成评测入口：
+
+- 每次评测只跑一个 arm。窗口外都由 VLA 驾驶；窗口内 `--arm rlt` 跑 actor 均值（没有探索噪声），`--arm vla` 继续跑
+  VLA。两者每个 chunk 都执行 C 步，与训练节奏相同。
+- 一个有标签的窗口是一个 trial；不训练、不写 replay；每轮结束时才把本轮的 trial 写进
+  `<run>/eval/<eval-name>/trials.jsonl`，断线时整轮丢弃。
+- 自主成功 = 标签为 success 且窗口内人工步为 0；成功率 = 自主成功数 / 未作废的有标签 trial 数。X 把本轮已有的 trial
+  和正开着的窗口都标成作废，单独计数。
+- W&B run 名 `<配置名>/<exp-name>/eval/<eval-name>`，轴是 `trial/*` 与 `round/*`。
+
 ## 5 人的流程
 
 操作员的一轮（Pico4）：
@@ -106,6 +122,10 @@ W&B：project 默认 `openpi-rlt`，run 名 `<配置名>/<exp-name>/rl`，三个
 6. 服务器训练期间机器人归位等待，训练完回到第 1 步。
 
 启动命令与按键表见 `examples/bi_flexiv_rizon4_rt/README.md`。
+
+评测时按键不变：到关键阶段按 B 开窗，按 B / Y 打标签，一个窗口就是一次试验；场景出错时按 X，本轮的试验都不计数；
+按 A 结束本轮。服务器不训练，机器人归位后可以直接开始下一轮。每次评测只测一个方法；比较两次评测时要看它们的时间是否
+接近，环境漂移会混进差别。
 
 研发流程。spec、plan、实验记录在研究工作区 `vla-post-train` 的 `docs/xense-openpi/`：
 
@@ -142,4 +162,6 @@ experiments.md   原始记录 → 结果分析 → 下一步（未确认）
 3. 代码：`algos/<algo>/` 放模型、loss、replay 行格式、采集逻辑、配置 dataclass 和 serving 适配；
    `configs/rl/<algo>/_example.yaml`；`scripts/rl/<algo>/` 放入口。
 4. 测试：用固定种子与参考实现做数值对照（参照 RLT 的 `tacxense_reference.py`），`layering_test.py` 保持通过。
-5. 本文档：第 2 节加模块表，第 3 节加 spec 映射，第 4、5 节补上与 RLT 不同的数据流和操作流程。
+5. 评测：在 `algos/<algo>/` 实现满足 `eval.Arm` 的 arm，并让 `scripts/rl/eval.py` 能按配置构造它；只有窗口内才返回
+   `"actor"` source。
+6. 本文档：第 2 节加模块表，第 3 节加 spec 映射，第 4、5 节补上与 RLT 不同的数据流和操作流程。
