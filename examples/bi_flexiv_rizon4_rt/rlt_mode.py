@@ -120,7 +120,9 @@ class Session:
 
     def _drain_buttons(self) -> None:
         for button in self.controller.consume_button_events():
-            self.operator.press(button, window_open=self.recording)
+            # X closes the window at once for the presses after it: a B/Y read in the same drain must not
+            # label a window that is being discarded (that label could never be reported).
+            self.operator.press(button, window_open=self.recording and not self.operator.discard)
 
     def home(self) -> None:
         self.env.reset()
@@ -173,7 +175,11 @@ class Session:
         self.tally.chunks += 1
         self.tally.actor_chunks += from_actor
         for index in range(_MAX_SEGMENTS):
-            self._latch()
+            if index:
+                # Not before the first segment: the server chose this chunk's policy from the window state
+                # latched at the end of the previous reply. A window requested in between opens when this
+                # chunk ends, so a window is never driven by the VLA first and the actor after.
+                self._latch()
             recording = self.recording
             executed, human = [], []
             released = False
