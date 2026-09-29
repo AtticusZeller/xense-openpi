@@ -106,7 +106,7 @@ def main() -> None:
     jax.config.update("jax_compilation_cache_dir", str(pathlib.Path("~/.cache/jax").expanduser()))
 
     dataset = prefix_cache.PrefixCacheDataset(tt.prefix_cache_dir)
-    identity = _vla.resolve(tt).cache_identity(tt)
+    identity = prefix_cache.cache_identity(_vla.resolve(tt.vla_config, tt.vla_checkpoint, repo_id=tt.repo_id), tt)
     prefix_cache.check_identity(dataset.metadata, identity)
     if dataset.seq_len > config.model.prefix_seq_len:
         raise ValueError(f"Cached prefixes have {dataset.seq_len} tokens > model.prefix_seq_len.")

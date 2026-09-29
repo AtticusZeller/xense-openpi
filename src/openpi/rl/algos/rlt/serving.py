@@ -77,7 +77,8 @@ def create_rlt_policy(
             raise FileNotFoundError(f"No RL checkpoint under {config.rl_checkpoint_dir}.")
         rl_checkpoint = max(rounds, key=lambda p: int(p.name))
     rl_checkpoint = pathlib.Path(rl_checkpoint)
-    frozen = _vla.resolve(config.token_training)
+    tt = config.token_training
+    frozen = _vla.resolve(tt.vla_config, tt.vla_checkpoint, repo_id=tt.repo_id)
     token_checkpoint = _features.resolve_token_checkpoint(rl.token_checkpoint or config.token_checkpoint_dir)
     extractor = _features.FeatureExtractor.from_vla(frozen, token_checkpoint, rl, num_steps=rl.num_steps)
     actor, binding = _learner.load_actor(rl_checkpoint, rl, extractor.space, z_dim=extractor.z_dim)

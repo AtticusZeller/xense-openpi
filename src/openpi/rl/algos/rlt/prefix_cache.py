@@ -19,16 +19,19 @@ to the dense size.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import pathlib
 import shutil
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import jax
 import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
+
+if TYPE_CHECKING:
+    from openpi.rl.algos.rlt import config as _rlt_config
+    from openpi.rl.vla import frozen as _vla
 
 FORMAT_VERSION = 1
 METADATA_FILE = "metadata.json"
@@ -38,21 +41,9 @@ _DTYPE = ml_dtypes.bfloat16
 IDENTITY_KEYS = ("vla_config", "params_fingerprint", "norm_stats_fingerprint", "repo_id", "frame_stride")
 
 
-def directory_fingerprint(path: pathlib.Path | str) -> str:
-    """Cheap content identity of a checkpoint directory.
-
-    Hashes every file's relative path and size, plus the full bytes of files
-    under 1 MiB (orbax metadata, norm stats). Survives the directory being
-    moved; changes whenever the checkpoint is rewritten.
-    """
-    root = pathlib.Path(path)
-    digest = hashlib.sha256()
-    for file in sorted(p for p in root.rglob("*") if p.is_file()):
-        size = file.stat().st_size
-        digest.update(f"{file.relative_to(root)}:{size}\n".encode())
-        if size < 2**20:
-            digest.update(file.read_bytes())
-    return digest.hexdigest()
+def cache_identity(frozen: _vla.FrozenVLA, token_training: _rlt_config.TokenTrainingConfig) -> dict[str, Any]:
+    """What a prefix cache must have been built from to serve ``token_training``."""
+    return {**frozen.vla_identity(), "repo_id": frozen.data_config.repo_id, "frame_stride": token_training.frame_stride}
 
 
 def load_metadata(root: pathlib.Path | str) -> dict[str, Any] | None:
@@ -159,7 +150,9 @@ class PrefixCacheDataset:
         self.root = pathlib.Path(root)
         metadata = load_metadata(self.root)
         if metadata is None or not metadata.get("complete"):
-            raise FileNotFoundError(f"No complete prefix cache at {self.root}; run scripts/rl/rlt/precompute_prefix.py.")
+            raise FileNotFoundError(
+                f"No complete prefix cache at {self.root}; run scripts/rl/rlt/precompute_prefix.py."
+            )
         if metadata["format_version"] != FORMAT_VERSION:
             raise ValueError(f"Prefix cache format {metadata['format_version']} != {FORMAT_VERSION}; rebuild it.")
         self.metadata = metadata

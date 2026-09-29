@@ -81,7 +81,7 @@ def main() -> None:
     if args.overwrite and root.exists():
         prefix_cache.delete(root)
 
-    frozen = _vla.resolve(token_training)
+    frozen = _vla.resolve(token_training.vla_config, token_training.vla_checkpoint, repo_id=token_training.repo_id)
     model_config = frozen.train_config.model
     dataset = _data_loader.transform_dataset(
         _data_loader.create_torch_dataset(frozen.data_config, model_config.action_horizon, model_config),
@@ -94,7 +94,7 @@ def main() -> None:
     seq_len, hidden_dim = _prefix_shape(model, model_config)
     writer = prefix_cache.CacheWriter(
         root,
-        identity=frozen.cache_identity(token_training),
+        identity=prefix_cache.cache_identity(frozen, token_training),
         frame_index=frame_index,
         seq_len=seq_len,
         hidden_dim=hidden_dim,

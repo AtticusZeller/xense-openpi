@@ -1,8 +1,9 @@
-"""The frozen VLA behind RLT: its config, checkpoint-owned preprocessing and identity."""
+"""The frozen VLA behind online RL: its config, checkpoint-owned preprocessing and identity."""
 
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import pathlib
 from typing import Any
 
@@ -10,8 +11,6 @@ import jax.numpy as jnp
 
 from openpi.models import pi0_config
 import openpi.models.model as _model
-from openpi.rl.algos.rlt import config as _rlt_config
-from openpi.rl.algos.rlt import prefix_cache
 from openpi.shared import download
 import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
@@ -46,7 +45,7 @@ class FrozenVLA:
         )
 
     def check_default_prompt(self) -> str:
-        """The prompt online RLT feeds the VLA; robot observations carry none, so the VLA config must."""
+        """The prompt online RL feeds the VLA; robot observations carry none, so the VLA config must."""
         prompts = [
             t.prompt
             for t in self.data_config.model_transforms.inputs
@@ -55,7 +54,7 @@ class FrozenVLA:
         if not prompts:
             raise ValueError(
                 f"{self.train_config.name} sets no data.default_prompt. Robot observations carry no prompt, "
-                "so online RLT needs the task prompt there (the one the VLA was trained with)."
+                "so online RL needs the task prompt there (the one the VLA was trained with)."
             )
         return prompts[0]
 
@@ -75,30 +74,39 @@ class FrozenVLA:
         return {
             "vla_config": self.train_config.name,
             "vla_checkpoint": str(self.checkpoint_dir),
-            "params_fingerprint": prefix_cache.directory_fingerprint(self.checkpoint_dir / "params"),
-            "norm_stats_fingerprint": prefix_cache.directory_fingerprint(
-                self.checkpoint_dir / "assets" / self.data_config.asset_id
-            ),
+            "params_fingerprint": directory_fingerprint(self.checkpoint_dir / "params"),
+            "norm_stats_fingerprint": directory_fingerprint(self.checkpoint_dir / "assets" / self.data_config.asset_id),
         }
 
-    def cache_identity(self, token_training: _rlt_config.TokenTrainingConfig) -> dict[str, Any]:
-        """What a prefix cache must have been built from to serve this config."""
-        return {**self.vla_identity(), "repo_id": self.data_config.repo_id, "frame_stride": token_training.frame_stride}
+
+def directory_fingerprint(path: pathlib.Path | str) -> str:
+    """Cheap content identity of a checkpoint directory.
+
+    Hashes every file's relative path and size, plus the full bytes of files
+    under 1 MiB (orbax metadata, norm stats). Survives the directory being
+    moved; changes whenever the checkpoint is rewritten.
+    """
+    root = pathlib.Path(path)
+    digest = hashlib.sha256()
+    for file in sorted(p for p in root.rglob("*") if p.is_file()):
+        size = file.stat().st_size
+        digest.update(f"{file.relative_to(root)}:{size}\n".encode())
+        if size < 2**20:
+            digest.update(file.read_bytes())
+    return digest.hexdigest()
 
 
-def resolve(token_training: _rlt_config.TokenTrainingConfig) -> FrozenVLA:
-    """Resolve the VLA config and checkpoint named by ``token_training``.
+def resolve(vla_config: str, vla_checkpoint: str, *, repo_id: str | None = None) -> FrozenVLA:
+    """Resolve a VLA TrainConfig name and one of its checkpoints (``repo_id`` overrides its dataset).
 
     Norm stats are loaded strictly from the checkpoint's ``assets/``, never the
     mutable repo-level assets tree: pi05 renders the *normalized* state into the
     prompt, so other stats would feed the frozen VLA a prefix it never saw.
     """
-    train_config = _config.get_config(token_training.vla_config)
-    if token_training.repo_id is not None:
-        train_config = dataclasses.replace(
-            train_config, data=dataclasses.replace(train_config.data, repo_id=token_training.repo_id)
-        )
-    checkpoint_dir = pathlib.Path(download.maybe_download(token_training.vla_checkpoint)).resolve()
+    train_config = _config.get_config(vla_config)
+    if repo_id is not None:
+        train_config = dataclasses.replace(train_config, data=dataclasses.replace(train_config.data, repo_id=repo_id))
+    checkpoint_dir = pathlib.Path(download.maybe_download(vla_checkpoint)).resolve()
     if not (checkpoint_dir / "params").is_dir():
         raise FileNotFoundError(f"{checkpoint_dir} is not an openpi checkpoint step dir (no params/).")
 

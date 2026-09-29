@@ -107,7 +107,8 @@ def main() -> None:
     if dump_dir is not None:
         dump_dir.mkdir(parents=True, exist_ok=True)
 
-    frozen = _vla.resolve(config.token_training)
+    tt = config.token_training
+    frozen = _vla.resolve(tt.vla_config, tt.vla_checkpoint, repo_id=tt.repo_id)
     prompt = frozen.check_default_prompt()
     token_checkpoint = _features.resolve_token_checkpoint(rl.token_checkpoint or config.token_checkpoint_dir)
     extractor = _features.FeatureExtractor.from_vla(
