@@ -225,7 +225,8 @@ class Collector:
                 "success": label == "success",
                 "actor_enabled": window.actor_enabled,
                 "episode_id": self._episode_id,
-                "round_id": self.learner.counters.rounds,
+                # 1-based, as the round axis, the chunk log and the dump file names count rounds.
+                "round_id": self.learner.counters.rounds + 1,
                 "source": _replay.chunk_source(window.source),
                 "timestamp": timestamp,
                 # For the transition dump only (replay ignores them): what the robot ran, and the

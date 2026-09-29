@@ -144,6 +144,8 @@ def test_round_turns_a_labeled_phase_into_sliding_windows():
     assert [row["next_obs"]["z_rl"][0] for row in rows] == [8, 10, 12, 14]
     assert all(np.abs(row["actions"]).max() <= 1 for row in rows)
     assert result["metrics"]["success"] == 1
+    # The first round is round 1 everywhere: in the rows as on the round axis and in round_00001.npz.
+    assert {row["round_id"] for row in rows} == {1}
 
 
 def test_unlabeled_and_discarded_windows_leave_no_rows():
@@ -239,6 +241,9 @@ def test_round_logs_chunks_and_dumps_transitions(tmp_path):
     assert dump["executed_actions"].shape == (4, C, 20)
     assert dump["ref_exec"].shape == (4, R, 20)
     np.testing.assert_array_equal(dump["curr_obs_z_rl"][:, 0], [4, 6, 8, 10])
+    mixed, human, vla = _replay.SOURCE_MIXED, _replay.SOURCE_HUMAN, _replay.SOURCE_VLA
+    np.testing.assert_array_equal(dump["source"], [mixed, human, mixed, vla])
+    np.testing.assert_array_equal(dump["timestamp"], [row["timestamp"] for row in result["rows"]])
 
 
 def test_training_reports_gradient_diagnostics():
