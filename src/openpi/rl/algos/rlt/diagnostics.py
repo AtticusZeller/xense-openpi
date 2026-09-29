@@ -1,18 +1,14 @@
-"""Observation-only statistics and logging for online RLT (nothing here changes training).
+"""Observation-only statistics for online RLT (nothing here changes training).
 
-``RunLogger`` logs to W&B on three independent axes - one row per round, per
-gradient update and per executed chunk - each with its own step counter, and
-mirrors every row to ``events.jsonl`` when a dump directory is set. Logging
-failures are warned about once and never interrupt the robot loop.
+RLT logs through ``openpi.rl.run_logger.RunLogger`` on the three ``AXES``: one row
+per round, per gradient update and per executed chunk.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import pathlib
-import time
 from typing import Any
 
 import numpy as np
@@ -20,30 +16,6 @@ import numpy as np
 from openpi.rl.vla import action_space as _action_space
 
 AXES = ("round", "update", "chunk")
-
-
-class RunLogger:
-    def __init__(self, run: Any | None, dump_dir: pathlib.Path | None = None):
-        self._run = run
-        self._dump_dir = dump_dir
-        self._warned = False
-        if run is not None:
-            for axis in AXES:
-                run.define_metric(f"{axis}/step")
-                run.define_metric(f"{axis}/*", step_metric=f"{axis}/step")
-
-    def log(self, axis: str, step: int, values: dict[str, Any]) -> None:
-        try:
-            row = {key: float(value) for key, value in values.items() if value is not None}
-            if self._run is not None:
-                self._run.log({**{f"{axis}/{k}": v for k, v in row.items()}, f"{axis}/step": step})
-            if self._dump_dir is not None:
-                with (self._dump_dir / "events.jsonl").open("a") as f:
-                    f.write(json.dumps({"axis": axis, "step": step, "time": time.time(), **row}) + "\n")
-        except Exception:
-            if not self._warned:
-                logging.warning("RLT metric logging failed; further failures are silent.", exc_info=True)
-                self._warned = True
 
 
 def _groups(space: _action_space.ActionSpace) -> dict[str, list[int]]:

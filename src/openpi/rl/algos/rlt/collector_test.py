@@ -4,6 +4,7 @@ import json
 import numpy as np
 import pytest
 
+from openpi.rl import run_logger
 from openpi.rl.algos.rlt import collector as _collector
 from openpi.rl.algos.rlt import config as _rlt_config
 from openpi.rl.algos.rlt import diagnostics
@@ -228,7 +229,7 @@ def test_stride_must_divide_the_chunk():
 
 def test_round_logs_chunks_and_dumps_transitions(tmp_path):
     collector, _, _ = _setup(_PLAN)
-    collector.logger = diagnostics.RunLogger(None, tmp_path)
+    collector.logger = run_logger.RunLogger(None, tmp_path, axes=diagnostics.AXES)
     collector.dump_dir = tmp_path
     result = collector.run_round()
     events = [json.loads(line) for line in (tmp_path / "events.jsonl").read_text().splitlines()]

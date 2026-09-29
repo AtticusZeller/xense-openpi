@@ -33,6 +33,7 @@ import shutil
 import numpy as np
 import wandb
 
+from openpi.rl import run_logger as _run_logger
 from openpi.rl.algos.rlt import collector as _collector
 from openpi.rl.algos.rlt import config as _rlt_config
 from openpi.rl.algos.rlt import diagnostics as _diagnostics
@@ -164,7 +165,7 @@ def main() -> None:
     )
     if config.wandb_enabled:
         wandb_id_path.write_text(run.id)
-    logger = _diagnostics.RunLogger(run if config.wandb_enabled else None, dump_dir)
+    logger = _run_logger.RunLogger(run if config.wandb_enabled else None, dump_dir, axes=_diagnostics.AXES)
 
     host, port = rl.listen.rsplit(":", 1)
     env = env_protocol.RemoteEnv(host, int(port), state_dim=space.state_dim, action_dim=space.action_dim)

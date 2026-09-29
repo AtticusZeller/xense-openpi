@@ -19,12 +19,14 @@ import time
 
 import numpy as np
 
+from openpi.rl import run_logger as _run_logger
 from openpi.rl.algos.rlt import critical_trace as _critical_trace
 from openpi.rl.algos.rlt import diagnostics as _diagnostics
 from openpi.rl.algos.rlt import features as _features
 from openpi.rl.algos.rlt import learner as _learner
 from openpi.rl.algos.rlt import replay as _replay
 from openpi.rl.env import protocol as env_protocol
+from openpi.rl.env import session as _session
 
 
 class Collector:
@@ -34,14 +36,14 @@ class Collector:
         extractor: _features.FeatureExtractor,
         learner: _learner.Learner,
         *,
-        logger: _diagnostics.RunLogger | None = None,
+        logger: _run_logger.RunLogger | None = None,
         dump_dir: pathlib.Path | None = None,
     ):
         self.env = env
         self.extractor = extractor
         self.learner = learner
         self.config = learner.config
-        self.logger = logger or _diagnostics.RunLogger(None)
+        self.logger = logger or _run_logger.RunLogger(None, axes=_diagnostics.AXES)
         self.dump_dir = dump_dir
         self._episode_id = 0  # one id per critical phase (recording window)
 
@@ -54,24 +56,21 @@ class Collector:
         config = self.config
         space = self.learner.space
         horizon = config.num_action_chunks
-        reply = self.env.request(
-            {
-                "op": "reset",
-                "takeover_position_m": config.takeover_position_m,
-                "takeover_rotation_deg": config.takeover_rotation_deg,
-                "capture_stride": config.replay_stride,
-            }
+        session = _session.RoundSession(
+            self.env,
+            action_dim=space.action_dim,
+            takeover_position_m=config.takeover_position_m,
+            takeover_rotation_deg=config.takeover_rotation_deg,
+            capture_stride=config.replay_stride,
         )
-        features = self.extractor.extract(reply["obs"])
-        recording = bool(reply["recording"])
+        features = self.extractor.extract(session.reset())
         trace: _critical_trace.CriticalTrace | None = None
         rows: list[dict] = []
         phase_steps: list[int] = []
         tally = collections.Counter()
-        round_end = False
-        while not round_end:
+        while not session.round_over:
             # The actor only ever runs inside an open window, and only once replay has warmed up.
-            use_actor = recording and self.learner.warmed_up
+            use_actor = session.recording and self.learner.warmed_up
             reference = features["ref_chunk"][:horizon]
             if use_actor:
                 decision, actions = self.learner.act(features)
@@ -91,30 +90,29 @@ class Collector:
             if tally["chunks"] == 0:
                 self._initial_action_diagnostic(features, actions, use_actor=use_actor)
             started = time.monotonic()
-            reply = self.env.request({"op": "chunk", "actions": actions, "source": "actor" if use_actor else "vla"})
+            result = session.execute(actions, source="actor" if use_actor else "vla")
             execution_s = time.monotonic() - started
             tally["chunks"] += 1
             tally["actor_chunks"] += use_actor
-            captures = {int(c["step"]): c["obs"] for c in reply["captures"]}
+            captures = result.captures
 
             chunk = collections.Counter()
-            for segment in reply["segments"]:
-                if segment["recording"] and trace is None:
+            for segment in result.segments:
+                if segment.opened:
                     self._episode_id += 1
                     trace = _critical_trace.CriticalTrace(horizon, config.replay_stride)
                     trace.add_features(0, features)
-                elif not segment["recording"] and trace is not None:
+                elif segment.closed_unlabeled:
                     logging.info("Window closed without a label; dropping %d steps.", len(trace))
                     trace = None
-                human = np.asarray(segment["human"], bool)
-                executed = np.asarray(segment["executed"], np.float32).reshape(len(human), space.action_dim)
+                human, executed = segment.human, segment.executed
                 chunk.update(
-                    steps=len(human), human_steps=int(human.sum()), recording_steps=len(human) * segment["recording"]
+                    steps=len(human), human_steps=int(human.sum()), recording_steps=len(human) * segment.recording
                 )
                 if len(human):
                     chunk.update(space.diagnose(executed, features["state"]))
                 extract_started = time.monotonic()
-                features = self.extractor.extract(segment["obs"])
+                features = self.extractor.extract(segment.obs)
                 chunk["feature_ms"] += 1000 * (time.monotonic() - extract_started)
                 if trace is not None:
                     source = np.where(
@@ -126,30 +124,29 @@ class Collector:
                     for step in range(start + 1, len(trace)):
                         if step in captures:
                             trace.add_observation(step, captures[step])
-                if segment["discard"]:
+                if segment.discard:
                     self.env.status(f"Discard: dropped this round's {len(rows)} labeled transitions.")
                     rows.clear()
                     phase_steps.clear()
                     trace = None
                     tally["discards"] += 1
-                elif segment["label"] is not None and trace is not None:
-                    phase_rows, dropped = self._close_phase(trace, segment["label"])
+                elif segment.label is not None:
+                    # The session only reports a label that closes an open window, so a trace is running.
+                    phase_rows, dropped = self._close_phase(trace, segment.label)
                     if phase_rows:
                         rows += phase_rows
                         phase_steps.append(len(trace))
                     # Confirm on the operator's terminal what the label produced, before the next chunk.
                     self.env.status(
-                        f"{segment['label'].capitalize()} labeled: {len(trace)}-step phase -> "
+                        f"{segment.label.capitalize()} labeled: {len(trace)}-step phase -> "
                         + (
                             f"dropped ({dropped})"
                             if dropped
                             else f"+{len(phase_rows)} transitions ({len(rows)} this round)"
                         )
                     )
-                    tally[segment["label"]] += 1
+                    tally[segment.label] += 1
                     trace = None
-                round_end = round_end or bool(segment["round_end"])
-            recording = bool(reply["recording_next"])
 
             tally.update({k: v for k, v in chunk.items() if k != "feature_ms"})
             self.learner.counters.chunks += 1
@@ -161,7 +158,7 @@ class Collector:
                     **chunk_log,
                     "round": self.learner.counters.rounds + 1,
                     "use_actor": use_actor,
-                    "segments": len(reply["segments"]),
+                    "segments": len(result.segments),
                     "execution_s": execution_s,
                 },
             )
