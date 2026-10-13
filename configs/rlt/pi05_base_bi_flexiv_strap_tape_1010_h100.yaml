@@ -25,7 +25,7 @@ token_training:
   vla_config: pi05_base_bi_flexiv_strap_tape_1010_h100
   # TODO: point at the strap-tape SFT run's orbax step dir (params/ + assets/);
   # insert_ethernet uses the policy-server checkpoint on xense-inference.
-  vla_checkpoint: /home/li/hubo/xense-openpi/checkpoints/strap_tape
+  vla_checkpoint: /home/li/hubo/xense-openpi/checkpoints/59999
   prefix_cache_dir: /data/rlt_cache/strap_tape_1010 # ~3.6 MB per cached frame; use fast local disk
   repo_id: null # inherits Xense/strap-tape-taccap-0929 from the VLA config
   frame_stride: 1
@@ -47,7 +47,7 @@ token_training:
 # Fixed network structure and other settings use RLConfig defaults.
 rl:
   # TODO: this run's own token/ dir (null) or a phase-one token step dir.
-  token_checkpoint: null
+  token_checkpoint: /home/li/tmp/xense-openpi/checkpoints/60000
   num_action_chunks: 20 # C: executed steps per chunk and TD bootstrap horizon
   ref_num_action_chunks: 50 # VLA reference length; the actor consumes the first C steps
 
