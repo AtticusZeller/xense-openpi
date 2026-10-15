@@ -74,11 +74,32 @@ class Policy(BasePolicy):
                 logging.info("Using training_time_rtc_sample_actions for inference")
                 self._sample_actions = nnx_utils.module_jit(model.training_time_rtc_sample_actions)
             else:
-                self._sample_actions = nnx_utils.module_jit(model.sample_actions)
-            self._rng = rng or jax.random.key(0)
+                # `num_samples` sets array shapes and `train` selects a code path, so both must be static.
+                self._sample_actions = nnx_utils.module_jit(
+                    model.sample_actions, static_argnames=("num_samples", "train")
+                )
+            # `is not None` rather than truthiness: the rng may be a tracer when a caller builds the policy under jit.
+            self._rng = rng if rng is not None else jax.random.key(0)
 
     @override
-    def infer(self, obs: dict, *, noise: np.ndarray | None = None, **kwargs) -> dict:  # type: ignore[misc]
+    def infer(  # type: ignore[misc]
+        self,
+        obs: dict,
+        *,
+        noise: np.ndarray | None = None,
+        is_batch: bool = False,
+        for_training: bool = False,
+        **kwargs,
+    ) -> dict:
+        """Run the input transforms, sample actions and run the output transforms.
+
+        Args:
+            is_batch: `obs` already carries a leading batch dimension; do not add or strip one.
+            for_training: Keep outputs as JAX arrays so that `infer` can run inside a caller's `jax.jit`, as the
+                EXPO-FT learner does when sampling candidates (JAX models only).
+        """
+        if for_training and self._is_pytorch_model:
+            raise ValueError("for_training is only supported for JAX models.")
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
@@ -98,22 +119,23 @@ class Policy(BasePolicy):
             rtc_obs["actions"] = np.array(kwargs["prev_chunk_left_over"], copy=True)
             rtc_inputs = self._input_transform(rtc_obs)
 
+        batch_index = slice(None) if is_batch else np.newaxis
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
-            inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
+            inputs = jax.tree.map(lambda x: jnp.asarray(x)[batch_index, ...], inputs)
             self._rng, sample_rng_or_pytorch_device = jax.random.split(self._rng)
             if rtc_inputs is not None:
-                rtc_inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], rtc_inputs)
+                rtc_inputs = jax.tree.map(lambda x: jnp.asarray(x)[batch_index, ...], rtc_inputs)
         else:
             # Convert inputs to PyTorch tensors and move to correct device
             inputs = jax.tree.map(
-                lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...],
+                lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[batch_index, ...],
                 inputs,
             )
             sample_rng_or_pytorch_device = self._pytorch_device
             if rtc_inputs is not None:
                 rtc_inputs = jax.tree.map(
-                    lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...],
+                    lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[batch_index, ...],
                     rtc_inputs,
                 )
 
@@ -157,10 +179,13 @@ class Policy(BasePolicy):
             "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
         }
         model_time = time.monotonic() - start_time
+        unbatch = slice(None) if is_batch else 0
         if self._is_pytorch_model:
-            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
+            outputs = jax.tree.map(lambda x: np.asarray(x[unbatch, ...].detach().cpu()), outputs)
+        elif for_training:
+            outputs = jax.tree.map(lambda x: jnp.asarray(x[unbatch, ...]), outputs)
         else:
-            outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+            outputs = jax.tree.map(lambda x: np.asarray(x[unbatch, ...]), outputs)
 
         # Keep a copy of the original actions before output transforms
         actions_original = outputs["actions"]

@@ -108,6 +108,47 @@ def test_pi05_extract_prefix_hidden():
     assert jnp.allclose(actions, nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=2), atol=1e-6)
 
 
+@pytest.mark.parametrize("pi05", [False, True])
+def test_sample_actions_num_samples_matches_single_sample_calls(pi05):
+    config = pi0_config.Pi0Config(
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        action_dim=8,
+        action_horizon=6,
+        max_token_len=8,
+        pi05=pi05,
+    )
+    model = config.create(jax.random.key(0))
+    obs = config.fake_obs(2)
+    num_samples = 3
+    shape = (config.action_horizon, config.action_dim)
+    noise = jax.random.normal(jax.random.key(1), (2, num_samples, *shape))
+    sample = nnx_utils.module_jit(model.sample_actions, static_argnames=("num_samples",))
+
+    batched = sample(jax.random.key(2), obs, num_steps=3, noise=noise, num_samples=num_samples)
+    assert batched.shape == (2 * num_samples, *shape)
+    # Sample-major: row b * num_samples + i is observation b denoised from noise[b, i].
+    batched = batched.reshape(2, num_samples, *shape)
+    for i in range(num_samples):
+        single = sample(jax.random.key(2), obs, num_steps=3, noise=noise[:, i])
+        assert jnp.allclose(batched[:, i], single, atol=1e-5)
+
+    # Without given noise each sample draws its own.
+    drawn = sample(jax.random.key(2), obs, num_steps=3, num_samples=num_samples).reshape(2, num_samples, *shape)
+    assert not jnp.allclose(drawn[:, 0], drawn[:, 1])
+
+
+def test_sample_actions_num_samples_rejects_rtc_arguments():
+    config = pi0_config.Pi0Config(
+        paligemma_variant="dummy", action_expert_variant="dummy", action_dim=8, max_token_len=8, pi05=True
+    )
+    model = config.create(jax.random.key(0))
+    with pytest.raises(ValueError, match="RTC"):
+        model.sample_actions(
+            jax.random.key(1), config.fake_obs(1), num_steps=2, num_samples=2, inference_delay=jnp.asarray([1])
+        )
+
+
 def test_pi0_fast_model():
     key = jax.random.key(0)
     config = pi0_fast.Pi0FASTConfig()

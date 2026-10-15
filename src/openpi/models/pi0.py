@@ -375,10 +375,24 @@ class Pi0(_model.BaseModel):
         observation: _model.Observation,
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
-        noise: at.Float[at.Array, "b ah ad"] | None = None,
+        noise: at.Float[at.Array, "b ah ad"] | at.Float[at.Array, "b n ah ad"] | None = None,
+        num_samples: int = 1,
+        train: bool = False,
         **kwargs: Unpack[_model.ActionSelectKwargs],
     ) -> _model.Actions:
-        return self._sample_actions(rng, observation, num_steps=num_steps, noise=noise, **kwargs)[0]
+        """Sample action chunks.
+
+        Args:
+            num_samples: Chunks drawn per observation, returned sample-major as `(b * num_samples, ah, ad)`.
+                The prefix runs once and its KV cache is shared, so each extra chunk only costs action-expert
+                passes; EXPO-FT draws its candidate chunks this way. A given `noise` is then `(b, num_samples, ah, ad)`.
+            train: Preprocess the observation with training-time augmentation.
+        """
+        if (num_samples > 1 or train) and any(value is not None for value in kwargs.values()):
+            raise ValueError("num_samples and train do not combine with RTC sampling arguments.")
+        return self._sample_actions(
+            rng, observation, num_steps=num_steps, noise=noise, num_samples=num_samples, train=train, **kwargs
+        )[0]
 
     def training_time_rtc_sample_actions(
         self,
@@ -410,46 +424,66 @@ class Pi0(_model.BaseModel):
         observation: _model.Observation,
         *,
         num_steps: int | at.Int[at.Array, ""] = 10,
-        noise: at.Float[at.Array, "b ah ad"] | None = None,
+        noise: at.Float[at.Array, "b ah ad"] | at.Float[at.Array, "b n ah ad"] | None = None,
+        num_samples: int = 1,
+        train: bool = False,
         **kwargs: Unpack[_model.ActionSelectKwargs],
     ) -> tuple[_model.Actions, at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"]]:
-        observation = _model.preprocess_observation(None, observation, train=False)
+        preprocess_rng = None
+        if train:
+            preprocess_rng, rng = jax.random.split(rng)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
         dt = -1.0 / num_steps
         batch_size = observation.state.shape[0]
+        noise_shape = (batch_size, self.action_horizon, self.action_dim)
+        if num_samples > 1:
+            noise_shape = (batch_size, num_samples, self.action_horizon, self.action_dim)
         if noise is None:
-            noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
+            noise = jax.random.normal(rng, noise_shape)
+        if noise.shape != noise_shape:
+            raise ValueError(f"Expected noise shape {noise_shape}, got {noise.shape}")
+        noise = noise.reshape((-1, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
         prefix_out, prefix_mask, kv_cache = self._prefix_forward(observation)
 
+        # Samples of one observation share its prefix: repeat the cache instead of recomputing it. The suffix side
+        # sees a sample-major batch, so the observation and prefix mask are repeated to match.
+        suffix_obs, attend_mask, attend_cache = observation, prefix_mask, kv_cache
+        if num_samples > 1:
+            suffix_obs = jax.tree.map(lambda x: jnp.repeat(x, num_samples, axis=0), observation)
+            attend_mask = jnp.repeat(prefix_mask, num_samples, axis=0)
+            attend_cache = jax.tree.map(lambda x: jnp.repeat(x, num_samples, axis=1), kv_cache)
+        num_rows = batch_size * num_samples
+
         def get_v_t(x_t, time, obs):  # equivalent to denoise_step in PyTorch
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                obs, x_t, jnp.broadcast_to(time, batch_size)
+                obs, x_t, jnp.broadcast_to(time, num_rows)
             )
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
             suffix_attn_mask = make_attn_mask(suffix_mask, suffix_ar_mask)
             # `prefix_attn_mask` is shape (b, suffix_len, prefix_len) indicating how the suffix tokens can attend to the
             # prefix tokens
-            prefix_attn_mask = einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1])
+            prefix_attn_mask = einops.repeat(attend_mask, "b p -> b s p", s=suffix_tokens.shape[1])
             # `combined_mask` is shape (b, suffix_len, prefix_len + suffix_len) indicating how the suffix tokens (which
             # generate the queries) can attend to the full prefix + suffix sequence (which generates the keys and values)
             full_attn_mask = jnp.concatenate([prefix_attn_mask, suffix_attn_mask], axis=-1)
             assert full_attn_mask.shape == (
-                batch_size,
+                num_rows,
                 suffix_tokens.shape[1],
-                prefix_mask.shape[1] + suffix_tokens.shape[1],
+                attend_mask.shape[1] + suffix_tokens.shape[1],
             )
             # `positions` is shape (b, suffix_len) indicating the positions of the suffix tokens
-            pos = jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
+            pos = jnp.sum(attend_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1
 
             (prefix_out, suffix_out), _ = self.PaliGemma.llm(
                 [None, suffix_tokens],
                 mask=full_attn_mask,
                 positions=pos,
-                kv_cache=kv_cache,
+                kv_cache=attend_cache,
                 adarms_cond=[None, adarms_cond],
             )
             assert prefix_out is None
@@ -457,7 +491,7 @@ class Pi0(_model.BaseModel):
 
         def step(carry):
             x_t, time = carry
-            v_t = get_v_t(x_t, time, observation)
+            v_t = get_v_t(x_t, time, suffix_obs)
 
             return x_t + dt * v_t, time + dt
 
