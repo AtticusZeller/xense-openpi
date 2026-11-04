@@ -1,0 +1,32 @@
+# Two-stage prompts: egg_carton_to_tray_1016_fixed relabeled per frame (episode 108 dropped) + open_egg_carton_1103.
+model:
+  type: Pi0Config
+  max_token_len: 128
+  pi05: true
+  discrete_state_input: true
+  enable_training_time_rtc: false
+  batch_image_views: true
+weight_loader:
+  type: CheckpointWeightLoader
+  params_path: gs://openpi-assets/checkpoints/pi05_base/params
+ema_decay: null
+data:
+  type: LeRobotBiEliteDataConfig
+  repo_id: Xense/bi_elite_cs66_rt_egg_carton_relabeled_plus_open_1103
+  use_delta_cartesian_actions: true
+  base_config:
+    dataset_root: /root/localstorage/hf_cache/lerobot/Xense/bi_elite_cs66_rt_egg_carton_relabeled_plus_open_1103
+    prompt_from_task: true
+    tactile: false
+    video_backend: pyav
+  default_prompt: Open the egg carton, then take out the eggs one by one and place
+    them in the egg tray.
+batch_size: 256
+num_workers: 64
+num_train_steps: 40000
+log_interval: 100
+save_interval: 10000
+keep_period: 10000
+fsdp_devices: 8
+strict_batch_order: false
+project_name: xense-openpi-hubo
