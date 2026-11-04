@@ -43,7 +43,7 @@ def test_inference_entry_loads_current_recipe_before_connecting(name, monkeypatc
     # Exercise main's real config loading and CLI overrides. A retired override
     # such as log_manipulability would fail before reaching this sentinel.
     with pytest.raises(ReachedPolicyConnectionError):
-        entrypoint.main(entrypoint.Args(robot_recipe=name))
+        entrypoint.main(entrypoint.Args(robot_recipe=name, prompt_switch=False))
 
 
 @pytest.mark.parametrize("connect_fails", [False, True])
@@ -108,7 +108,7 @@ def test_visualization_is_prepared_before_robot_connect_and_sampling_follows_it(
         lambda **kwargs: SimpleNamespace(run=lambda: events.append("run")),
     )
     monkeypatch.setattr(entrypoint.signal, "signal", lambda *args: None)
-    args = entrypoint.Args(robot_recipe="diagonal-08-taccap", visualize=True)
+    args = entrypoint.Args(robot_recipe="diagonal-08-taccap", visualize=True, prompt_switch=False)
     if connect_fails:
         with pytest.raises(ConnectionFailedError):
             entrypoint.main(args)

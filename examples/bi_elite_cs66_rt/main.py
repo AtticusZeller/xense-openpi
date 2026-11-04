@@ -45,6 +45,7 @@ from xense_client.runtime.agents import policy_agent as _policy_agent
 from xense_client.visualization import load_visualization_config
 
 import examples.bi_elite_cs66_rt.env as _env
+import examples.bi_elite_cs66_rt.prompt_switch as _prompt_switch
 from examples.bi_elite_cs66_rt.real_env import STATE_KEYS
 import examples.bi_elite_cs66_rt.recipe as _recipe
 import examples.run_config as _run_config
@@ -178,6 +179,11 @@ class Args:
     # None follows recipe visualization.enabled; CLI/run YAML can override it.
     visualize: bool | None = None
 
+    # Send the task prompt with every observation, starting with "Open the egg carton.";
+    # press 1 / 2 in this terminal to switch between the two stages. Needs stdin to be a TTY.
+    # --args.no-prompt-switch sends no prompt, so the server falls back to its default_prompt.
+    prompt_switch: bool = True
+
 
 def main(args: Args) -> None:
     logger.info(_run_config.describe(args, Args, RUNS_DIR))
@@ -187,6 +193,19 @@ def main(args: Args) -> None:
             "No bench selected. Pass --args.robot-recipe <name>, or --args.run <name> "
             f"for a run file that sets it. Recipes: {', '.join(_recipe.available_recipes())}."
         )
+
+    prompt_state = None
+    prompt_keys = None
+    if args.prompt_switch:
+        if args.action_hz > 0:
+            raise SystemExit(
+                "Prompt switching does not support --args.action-hz (decoupled mode): its paced action "
+                "queue would keep executing actions planned for the previous prompt. Drop "
+                "--args.action-hz, or pass --args.no-prompt-switch to run without prompt switching."
+            )
+        prompt_state = _prompt_switch.PromptState(_prompt_switch.OPEN_PROMPT)
+        # Built before connecting so a non-TTY stdin fails fast; the terminal mode changes in start().
+        prompt_keys = _prompt_switch.KeyboardPromptSwitcher(prompt_state)
 
     # Build the robot config before connecting: WebsocketClientPolicy blocks
     # until the policy server answers, and a bad recipe should not cost that wait.
@@ -324,6 +343,8 @@ def main(args: Args) -> None:
             max_episode_steps=args.max_episode_steps,
         )
     else:
+        if prompt_state is not None:
+            policy = _prompt_switch.PromptSwitchingPolicy(policy, prompt_state)
         runtime = _runtime.Runtime(
             environment=environment,
             agent=_policy_agent.PolicyAgent(policy=policy),
@@ -350,6 +371,8 @@ def main(args: Args) -> None:
     signal.signal(signal.SIGINT, signal_handler)
 
     try:
+        if prompt_keys is not None:
+            prompt_keys.start()
         runtime.run()
     except KeyboardInterrupt:
         logger.info("Keyboard interrupt")
@@ -360,6 +383,8 @@ def main(args: Args) -> None:
         traceback.print_exc()
         raise
     finally:
+        if prompt_keys is not None:
+            prompt_keys.stop()
         if visualization is not None:
             try:
                 visualization.close()
