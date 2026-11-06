@@ -387,7 +387,7 @@ class RTCActionChunkBroker(_base_policy.BasePolicy):
         if action is None:
             # Queue empty after first inference - this shouldn't happen often
             # Wait briefly and retry
-            logger.warning("Action queue empty! Waiting...")
+            logger.warn("Action queue empty! Waiting...")
             start_wait = time.time()
             while action is None and (time.time() - start_wait) < 5.0:
                 time.sleep(0.005)

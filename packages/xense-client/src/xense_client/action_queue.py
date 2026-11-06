@@ -42,7 +42,7 @@ class ActionQueue:
         """
         with self.lock:
             if self.queue is None or self.last_index >= len(self.queue):
-                logger.warning(
+                logger.warn(
                     "Action queue exhausted! No actions available. "
                     "This may cause robot to stall. Consider increasing execution_horizon "
                     "or reducing action_queue_size_to_get_new_actions."
