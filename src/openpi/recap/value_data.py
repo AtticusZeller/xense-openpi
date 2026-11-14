@@ -141,6 +141,10 @@ def load_episode_table(dataset_root: pathlib.Path) -> pd.DataFrame:
     # Episode indices double as row positions everywhere in this module.
     if not np.array_equal(episodes["episode_index"].to_numpy(), np.arange(len(episodes))):
         raise ValueError("Episode indices must be consecutive and start at 0.")
+    # Frames are laid out episode after episode; mapping a global frame index back to its episode relies on it.
+    lengths = episodes["length"].to_numpy()
+    if not np.array_equal(episodes["dataset_from_index"].to_numpy(), np.cumsum(lengths) - lengths):
+        raise ValueError("Episodes must be stored back to back in episode order.")
     return episodes
 
 

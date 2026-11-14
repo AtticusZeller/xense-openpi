@@ -153,3 +153,35 @@ def test_split_predictions_map_global_indices_back_to_episode_frames():
     assert table["episode_index"].tolist() == [0, 0, 1, 1, 2]
     assert table["frame_index"].tolist() == [0, 2, 0, 1, 3]
     np.testing.assert_array_equal(table["return"], [0, -2, -3, -4, -8])
+
+
+def _write_episodes(root, chunks: list[dict]) -> None:
+    for i, chunk in enumerate(chunks):
+        directory = root / "meta" / "episodes" / f"chunk-{i:03d}"
+        directory.mkdir(parents=True)
+        pd.DataFrame(chunk).to_parquet(directory / "file-000.parquet")
+
+
+def test_load_episode_table_joins_chunks_in_episode_order(tmp_path):
+    _write_episodes(
+        tmp_path,
+        [
+            {"episode_index": [2], "length": [4], "dataset_from_index": [5]},
+            {"episode_index": [0, 1], "length": [3, 2], "dataset_from_index": [0, 3]},
+        ],
+    )
+
+    episodes = _value_data.load_episode_table(tmp_path)
+
+    assert episodes["episode_index"].tolist() == [0, 1, 2]
+    assert episodes["dataset_from_index"].tolist() == [0, 3, 5]
+
+
+def test_load_episode_table_rejects_gaps_and_out_of_order_storage(tmp_path):
+    _write_episodes(tmp_path / "gap", [{"episode_index": [0, 2], "length": [3, 2], "dataset_from_index": [0, 3]}])
+    _write_episodes(tmp_path / "order", [{"episode_index": [0, 1], "length": [3, 2], "dataset_from_index": [2, 0]}])
+
+    with pytest.raises(ValueError, match="consecutive"):
+        _value_data.load_episode_table(tmp_path / "gap")
+    with pytest.raises(ValueError, match="back to back"):
+        _value_data.load_episode_table(tmp_path / "order")
