@@ -91,3 +91,65 @@ def test_value_frames_pairs_frames_with_returns():
     assert sample["target"] == returns[7]
     np.testing.assert_array_equal(sample["tokens"], [2, 5, 0])
     assert int(sample["images"][0, 0, 0, 0]) == round(0.7 * 255)
+
+
+def test_balanced_sampler_draws_every_dataset_equally_and_stays_in_range():
+    sizes = [50, 5000]
+    sampler = iter(_value_data.BalancedSampler(sizes, seed=0))
+
+    draws = np.array([next(sampler) for _ in range(10_000)])
+
+    assert draws.min() >= 0
+    assert draws.max() < sum(sizes)
+    assert abs((draws < sizes[0]).mean() - 0.5) < 0.02
+    # Within a dataset the draws cover it instead of sticking to a few frames.
+    assert len(np.unique(draws[draws < sizes[0]])) == sizes[0]
+    assert len(np.unique(draws[draws >= sizes[0]])) > 2000
+
+
+def test_balanced_sampler_is_deterministic_for_a_seed():
+    first = iter(_value_data.BalancedSampler([3, 7], seed=1))
+    second = iter(_value_data.BalancedSampler([3, 7], seed=1))
+
+    assert [next(first) for _ in range(100)] == [next(second) for _ in range(100)]
+
+
+def test_spread_picks_evenly_spaced_entries_including_both_ends():
+    indices = np.arange(100, 200)
+
+    np.testing.assert_array_equal(_value_data.spread(indices, 4), [100, 133, 166, 199])
+    assert len(_value_data.spread(indices, 300)) == 300
+
+
+def _split(lengths: list[int], val_fraction: float = 0.34) -> _value_data.Split:
+    lengths_array = np.array(lengths)
+    starts = np.concatenate([[0], np.cumsum(lengths_array)[:-1]])
+    episodes = pd.DataFrame(
+        {"episode_index": np.arange(len(lengths)), "length": lengths_array, "dataset_from_index": starts}
+    )
+    train, val = _value_data.split_episodes(len(lengths), val_fraction, seed=0)
+    returns = -np.arange(lengths_array.sum(), dtype=np.float32)
+    return _value_data.Split("org/toy", [], returns, {}, episodes, train, val)
+
+
+def test_split_keeps_held_out_frames_out_of_training():
+    split = _split([3, 2, 4, 5, 1, 6])
+
+    train, val = split.indices(split.train_episodes), split.indices(split.val_episodes)
+
+    assert len(split.val_episodes) == 2
+    assert not set(train) & set(val)
+    np.testing.assert_array_equal(np.sort(np.concatenate([train, val])), np.arange(21))
+    assert split.name == "toy"
+
+
+def test_split_predictions_map_global_indices_back_to_episode_frames():
+    split = _split([3, 2, 4])
+    index = np.array([0, 2, 3, 4, 8])
+
+    table = split.predictions(index, split.returns[index], np.zeros(5, dtype=np.float32))
+
+    assert table["dataset"].unique().tolist() == ["org/toy"]
+    assert table["episode_index"].tolist() == [0, 0, 1, 1, 2]
+    assert table["frame_index"].tolist() == [0, 2, 0, 1, 3]
+    np.testing.assert_array_equal(table["return"], [0, -2, -3, -4, -8])

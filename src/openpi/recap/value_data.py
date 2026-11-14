@@ -1,6 +1,7 @@
 """Data for training the RECAP value model: frames of a LeRobot dataset paired with normalized returns."""
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+import dataclasses
 import pathlib
 
 import numpy as np
@@ -141,3 +142,70 @@ def load_episode_table(dataset_root: pathlib.Path) -> pd.DataFrame:
     if not np.array_equal(episodes["episode_index"].to_numpy(), np.arange(len(episodes))):
         raise ValueError("Episode indices must be consecutive and start at 0.")
     return episodes
+
+
+class BalancedSampler(torch.utils.data.Sampler[int]):
+    """Yields indices into concatenated datasets forever: a uniformly chosen dataset, then a uniform frame of it.
+
+    Sampling by frame instead would let the largest dataset dominate the batches.
+    """
+
+    def __init__(self, sizes: Sequence[int], *, seed: int):
+        self._sizes = np.asarray(sizes, dtype=np.int64)
+        self._offsets = np.concatenate([[0], np.cumsum(self._sizes)[:-1]])
+        self._seed = seed
+
+    def __iter__(self) -> Iterator[int]:
+        rng = np.random.default_rng(self._seed)
+        while True:
+            dataset = rng.integers(len(self._sizes))
+            yield int(self._offsets[dataset] + rng.integers(self._sizes[dataset]))
+
+    def __len__(self) -> int:
+        """Only used for `len(DataLoader)`; iteration itself never stops."""
+        return int(self._sizes.sum())
+
+
+def spread(indices: np.ndarray, count: int) -> np.ndarray:
+    """Returns `count` entries of `indices` at evenly spaced positions (repeating entries if it is shorter)."""
+    return indices[np.linspace(0, len(indices) - 1, count).astype(int)]
+
+
+@dataclasses.dataclass(frozen=True)
+class Split:
+    """One dataset with its returns, task tokens and episode split."""
+
+    repo_id: str
+    dataset: torch.utils.data.Dataset
+    returns: np.ndarray
+    task_tokens: Mapping[int, tuple[np.ndarray, np.ndarray]]
+    # Columns `episode_index`, `length`, `dataset_from_index`, as returned by `load_episode_table`.
+    episodes: pd.DataFrame
+    train_episodes: np.ndarray
+    val_episodes: np.ndarray
+
+    @property
+    def name(self) -> str:
+        return self.repo_id.split("/")[-1]
+
+    def indices(self, episodes: np.ndarray) -> np.ndarray:
+        """Returns the global frame indices of `episodes`."""
+        starts, lengths = self.episodes["dataset_from_index"].to_numpy(), self.episodes["length"].to_numpy()
+        return frame_indices(starts, lengths, episodes)
+
+    def frames(self, indices: np.ndarray) -> ValueFrames:
+        return ValueFrames(self.dataset, indices, self.returns, self.task_tokens)
+
+    def predictions(self, index: np.ndarray, target: np.ndarray, value: np.ndarray) -> pd.DataFrame:
+        """Tabulates predictions by `(dataset, episode_index, frame_index)` from global frame indices."""
+        starts, lengths = self.episodes["dataset_from_index"].to_numpy(), self.episodes["length"].to_numpy()
+        episode = np.repeat(self.episodes["episode_index"].to_numpy(), lengths)[index]
+        return pd.DataFrame(
+            {
+                "dataset": self.repo_id,
+                "episode_index": episode,
+                "frame_index": index - starts[episode],
+                "return": target,
+                "value": value,
+            }
+        )

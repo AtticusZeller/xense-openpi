@@ -73,6 +73,9 @@ def plot_episode(episode: pd.DataFrame, frames: list[np.ndarray], positions: np.
 
 def main(args: Args) -> None:
     predictions = pd.read_parquet(args.predictions)
+    if "dataset" in predictions:
+        # Runs on several datasets write all of them into one file.
+        predictions = predictions[predictions["dataset"] == args.repo_id]
     episodes = args.episodes or tuple(sorted(predictions["episode_index"].unique().tolist()))
     dataset = _data_loader.SelectiveVideoLeRobotDataset(args.repo_id, root=args.dataset_root, tolerance_s=1e-2)
     dataset.decode_video_keys = frozenset({args.camera_key})

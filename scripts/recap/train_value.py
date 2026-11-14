@@ -1,8 +1,9 @@
-"""Trains the RECAP value model on a LeRobot dataset with sidecar returns.
+"""Trains the RECAP value model on one or more LeRobot datasets with sidecar returns.
 
-Needs the optional `gemma` package (see `openpi.recap.gemma3`). 10% of the episodes are held out; the
-script logs train/held-out loss and MAE, saves the params at every new best held-out metric, stops when
-that metric stops improving, and writes the held-out predictions of the best params.
+Needs the optional `gemma` package (see `openpi.recap.gemma3`). 10% of the episodes of every dataset are
+held out; the script logs train/held-out loss and MAE, saves the params at every new best held-out metric,
+stops when that metric stops improving, and writes the held-out predictions of the best params. With
+several datasets every dataset is sampled equally often and the held-out metrics are averaged over datasets.
 
 Usage:
     python scripts/recap/train_value.py --repo-id Xense/cylinder-stack-0909 \
@@ -11,17 +12,16 @@ Usage:
 """
 
 import dataclasses
+import itertools
 import logging
 import pathlib
 import time
 from typing import Literal
 
-import flax.traverse_util
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
-import orbax.checkpoint as ocp
 import pandas as pd
 import sentencepiece
 import torch
@@ -30,6 +30,7 @@ import wandb
 
 from openpi.models import model as _model
 import openpi.models.siglip as _siglip
+from openpi.recap import checkpoints as _checkpoints
 from openpi.recap import gemma3 as _gemma3
 from openpi.recap import value_data as _value_data
 from openpi.recap import value_model as _value_model
@@ -39,10 +40,10 @@ from openpi.training import data_loader as _data_loader
 
 @dataclasses.dataclass(frozen=True)
 class Args:
-    # LeRobot repo id of the dataset.
-    repo_id: str
-    # Sidecar parquet written by scripts/recap/compute_returns.py.
-    returns: pathlib.Path
+    # LeRobot repo ids of the datasets.
+    repo_id: tuple[str, ...]
+    # Sidecar parquets written by scripts/recap/compute_returns.py, one per repo id in the same order.
+    returns: tuple[pathlib.Path, ...]
     # Local copy of the Gemma3-270M checkpoint (`openpi.recap.gemma3.PARAMS_PATH`).
     gemma_params: pathlib.Path
     # Local copy of the Gemma3 sentencepiece model (`openpi.recap.gemma3.TOKENIZER_PATH`).
@@ -50,8 +51,10 @@ class Args:
     # Directory for checkpoints and predictions; the run goes to <output_dir>/<exp_name>.
     output_dir: pathlib.Path
     exp_name: str
-    # Root of the dataset. Defaults to the LeRobot cache.
-    dataset_root: pathlib.Path | None = None
+    # Roots of the datasets, one per repo id. Defaults to the LeRobot cache.
+    dataset_root: tuple[pathlib.Path, ...] = ()
+    # `params` directory of an earlier run to start from, instead of the SigLIP and Gemma3 pretrained weights.
+    init_params: pathlib.Path | None = None
     # openpi checkpoint providing the SigLIP So400m weights.
     siglip_params: str = "gs://openpi-assets/checkpoints/pi05_base/params"
     val_fraction: float = 0.1
@@ -62,13 +65,15 @@ class Args:
     warmup_steps: int = 500
     weight_decay: float = 1e-4
     log_interval: int = 50
-    # Every `eval_interval` steps, evaluate on `eval_batches` fixed held-out batches.
+    # Every `eval_interval` steps, evaluate on `eval_batches` fixed held-out batches, split evenly over datasets.
     eval_interval: int = 250
     eval_batches: int = 16
     # Held-out metric that selects the saved params: "mae" (of the expected value) or "loss" (cross-entropy).
     best_metric: Literal["mae", "loss"] = "mae"
     # Stop after this many evaluations in a row without a new best.
     patience: int = 3
+    # Held-out episodes per dataset predicted in full at the end. Defaults to all of them.
+    final_episodes: int | None = None
     num_workers: int = 32
     seed: int = 0
     wandb_enabled: bool = True
@@ -82,32 +87,22 @@ def build_model() -> _value_model.ValueModel:
     )
 
 
-def replace_subtree(params: dict, name: str, pretrained: dict) -> dict:
-    """Replaces `params[name]` with pretrained weights after checking that names and shapes match."""
-    expected = flax.traverse_util.flatten_dict(params[name], sep="/")
-    loaded = flax.traverse_util.flatten_dict(pretrained, sep="/")
-    if expected.keys() != loaded.keys():
-        raise ValueError(
-            f"{name}: missing {sorted(expected.keys() - loaded.keys())[:5]}, "
-            f"unexpected {sorted(loaded.keys() - expected.keys())[:5]}"
-        )
-    for key, value in expected.items():
-        if value.shape != loaded[key].shape:
-            raise ValueError(f"{name}/{key}: expected shape {value.shape}, got {loaded[key].shape}")
-    converted = {key: jnp.asarray(value, dtype=expected[key].dtype) for key, value in loaded.items()}
-    return {**params, name: flax.traverse_util.unflatten_dict(converted, sep="/")}
-
-
 def init_params(model: _value_model.ValueModel, args: Args) -> dict:
-    """Initializes the model and loads the pretrained SigLIP and Gemma3 weights."""
+    """Initializes the model, then loads either `args.init_params` or the pretrained SigLIP and Gemma3 weights."""
     images = jnp.zeros((1, 3, _value_data.IMAGE_SIZE, _value_data.IMAGE_SIZE, 3), jnp.float32)
     tokens = jnp.zeros((1, args.max_token_len), jnp.int32)
     params = model.init(jax.random.key(args.seed), images, tokens, tokens > 0)["params"]
+    if args.init_params is not None:
+        return _checkpoints.match_params(params, _checkpoints.restore_params(args.init_params), "init_params")
 
     openpi_params = _model.restore_params(download.maybe_download(args.siglip_params), restore_type=np.ndarray)
     siglip = {key: value for key, value in openpi_params["PaliGemma"]["img"].items() if key != "head"}
-    params = replace_subtree(params, "vision", siglip)
-    return replace_subtree(params, "language", _gemma3.load_pretrained_params(str(args.gemma_params)))
+    gemma = _gemma3.load_pretrained_params(str(args.gemma_params))
+    return {
+        **params,
+        "vision": _checkpoints.match_params(params["vision"], siglip, "vision"),
+        "language": _checkpoints.match_params(params["language"], gemma, "language"),
+    }
 
 
 def make_steps(model: _value_model.ValueModel, optimizer: optax.GradientTransformation):
@@ -171,45 +166,86 @@ def summarize(outputs: dict) -> dict:
     }
 
 
-def save_params(run_dir: pathlib.Path, params: dict) -> None:
-    with ocp.PyTreeCheckpointer() as checkpointer:
-        checkpointer.save((run_dir / "params").resolve(), {"params": jax.device_get(params)}, force=True)
-
-
-def main(args: Args) -> None:
-    run_dir = args.output_dir / args.exp_name
-    run_dir.mkdir(parents=True, exist_ok=True)
-
-    dataset_root = args.dataset_root
-    dataset = _data_loader.SelectiveVideoLeRobotDataset(args.repo_id, root=dataset_root, tolerance_s=1e-2)
+def load_split(
+    repo_id: str, returns: pathlib.Path, root: pathlib.Path | None, tokenizer, args: Args
+) -> _value_data.Split:
+    dataset = _data_loader.SelectiveVideoLeRobotDataset(repo_id, root=root, tolerance_s=1e-2)
     dataset.decode_video_keys = frozenset(_value_data.BI_FLEXIV_CAMERA_KEYS)
     episodes = _value_data.load_episode_table(pathlib.Path(dataset.root))
     starts, lengths = episodes["dataset_from_index"].to_numpy(), episodes["length"].to_numpy()
-    returns = _value_data.align_returns(pd.read_parquet(args.returns), starts, lengths)
-
-    tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(args.gemma_tokenizer))
     tasks = _data_loader._convert_tasks_to_dict(dataset.meta.tasks)
-    task_tokens = _value_data.tokenize_tasks(
-        lambda text: [tokenizer.bos_id(), *tokenizer.encode(text)], tasks, args.max_token_len
-    )
-
     train_episodes, val_episodes = _value_data.split_episodes(len(episodes), args.val_fraction, args.seed)
-    train_frames = _value_data.ValueFrames(
-        dataset, _value_data.frame_indices(starts, lengths, train_episodes), returns, task_tokens
+    split = _value_data.Split(
+        repo_id=repo_id,
+        dataset=dataset,
+        returns=_value_data.align_returns(pd.read_parquet(returns), starts, lengths),
+        task_tokens=_value_data.tokenize_tasks(
+            lambda text: [tokenizer.bos_id(), *tokenizer.encode(text)], tasks, args.max_token_len
+        ),
+        episodes=episodes,
+        train_episodes=train_episodes,
+        val_episodes=val_episodes,
     )
-    val_indices = _value_data.frame_indices(starts, lengths, val_episodes)
-    val_frames = _value_data.ValueFrames(dataset, val_indices, returns, task_tokens)
-    # A fixed, evenly spread subset of the held-out frames for the periodic evaluation.
-    subset = val_indices[np.linspace(0, len(val_indices) - 1, args.eval_batches * args.batch_size).astype(int)]
-    val_subset = _value_data.ValueFrames(dataset, subset, returns, task_tokens)
     logging.info(
-        "train: %d episodes / %d frames; held out: %d episodes / %d frames %s",
+        "%s: train %d episodes / %d frames; held out %d episodes / %d frames %s",
+        split.name,
         len(train_episodes),
-        len(train_frames),
+        len(split.indices(train_episodes)),
         len(val_episodes),
-        len(val_frames),
+        len(split.indices(val_episodes)),
         val_episodes.tolist(),
     )
+    return split
+
+
+def evaluate(eval_step, params, frames: list[_value_data.ValueFrames], args: Args, sharding) -> list[dict]:
+    """Predicts over the datasets in one pass; returns the per-frame outputs of each dataset."""
+    outputs = predict(eval_step, params, torch.utils.data.ConcatDataset(frames), args, sharding)
+    bounds = np.cumsum([0, *(len(f) for f in frames)])
+    return [{key: value[lo:hi] for key, value in outputs.items()} for lo, hi in itertools.pairwise(bounds)]
+
+
+def mean_metrics(per_dataset: list[dict]) -> dict:
+    """Averages metrics over datasets, so every dataset weighs the same whatever its size."""
+    return {key: float(np.mean([metrics[key] for metrics in per_dataset])) for key in per_dataset[0]}
+
+
+def log_metrics(prefix: str, step: int, splits: list[_value_data.Split], per_dataset: list[dict], args: Args) -> dict:
+    """Logs per-dataset metrics (when there are several datasets) and their mean; returns the mean."""
+    mean = mean_metrics(per_dataset)
+    if len(splits) > 1:
+        for split, metrics in zip(splits, per_dataset, strict=True):
+            logging.info(
+                "Step %d [%s]: %s_loss=%.4f %s_mae=%.4f %s_corr=%.4f",
+                step, split.name, prefix, metrics["loss"], prefix, metrics["mae"], prefix, metrics["corr"],
+            )  # fmt: skip
+            if args.wandb_enabled:
+                wandb.log({f"{prefix}_{split.name}/{key}": value for key, value in metrics.items()}, step=step)
+    logging.info(
+        "Step %d: %s_loss=%.4f %s_mae=%.4f %s_corr=%.4f",
+        step, prefix, mean["loss"], prefix, mean["mae"], prefix, mean["corr"],
+    )  # fmt: skip
+    if args.wandb_enabled:
+        wandb.log({f"{prefix}/{key}": value for key, value in mean.items()}, step=step)
+    return mean
+
+
+def main(args: Args) -> None:
+    roots = args.dataset_root or (None,) * len(args.repo_id)
+    if not (len(args.repo_id) == len(args.returns) == len(roots)):
+        raise ValueError("--repo-id, --returns and --dataset-root (when given) need one value per dataset.")
+    run_dir = args.output_dir / args.exp_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    tokenizer = sentencepiece.SentencePieceProcessor(model_file=str(args.gemma_tokenizer))
+    splits = [
+        load_split(repo_id, returns, root, tokenizer, args)
+        for repo_id, returns, root in zip(args.repo_id, args.returns, roots, strict=True)
+    ]
+    train_frames = [split.frames(split.indices(split.train_episodes)) for split in splits]
+    # A fixed, evenly spread subset of each dataset's held-out frames for the periodic evaluation.
+    subset_size = max(args.batch_size, args.eval_batches * args.batch_size // len(splits))
+    val_subsets = [split.frames(_value_data.spread(split.indices(split.val_episodes), subset_size)) for split in splits]
 
     mesh = jax.make_mesh((jax.device_count(),), ("batch",))
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("batch"))
@@ -221,7 +257,7 @@ def main(args: Args) -> None:
     logging.info("value model parameters: %.1fM", num_params / 1e6)
 
     schedule = optax.warmup_cosine_decay_schedule(
-        0.0, args.peak_lr, args.warmup_steps, args.num_train_steps, args.peak_lr * 0.1
+        0.0, args.peak_lr, args.warmup_steps, max(args.num_train_steps, args.warmup_steps + 1), args.peak_lr * 0.1
     )
     optimizer = optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(schedule, weight_decay=args.weight_decay))
     opt_state = jax.device_put(optimizer.init(params), replicated)
@@ -233,10 +269,15 @@ def main(args: Args) -> None:
         )
 
     loader = _data_loader.TorchDataLoader(
-        train_frames,
+        torch.utils.data.ConcatDataset(train_frames),
         args.batch_size,
         sharding=data_sharding,
         shuffle=True,
+        # With one dataset the default sampler shuffles its frames; with several, every dataset is drawn
+        # equally often whatever its size.
+        sampler=_value_data.BalancedSampler([len(f) for f in train_frames], seed=args.seed)
+        if len(splits) > 1
+        else None,
         num_workers=args.num_workers,
         seed=args.seed,
     )
@@ -246,20 +287,12 @@ def main(args: Args) -> None:
     step = 0
     for step in range(args.num_train_steps + 1):
         if step % args.eval_interval == 0 or step == args.num_train_steps:
-            metrics = summarize(predict(eval_step, params, val_subset, args, data_sharding))
-            logging.info(
-                "Step %d: val_loss=%.4f val_mae=%.4f val_corr=%.4f",
-                step,
-                metrics["loss"],
-                metrics["mae"],
-                metrics["corr"],
-            )
-            if args.wandb_enabled:
-                wandb.log({f"val/{key}": value for key, value in metrics.items()}, step=step)
+            outputs = evaluate(eval_step, params, val_subsets, args, data_sharding)
+            metrics = log_metrics("val", step, splits, [summarize(o) for o in outputs], args)
             if metrics[args.best_metric] < best_value:
                 best_value, best_step, best_params = metrics[args.best_metric], step, params
                 # Written at every new best so an interrupted run still leaves usable params.
-                save_params(run_dir, params)
+                _checkpoints.save_params(run_dir / "params", params)
                 logging.info("Step %d: new best val_%s=%.4f, params saved", step, args.best_metric, best_value)
             elif step - best_step >= args.patience * args.eval_interval:
                 logging.info(
@@ -290,26 +323,17 @@ def main(args: Args) -> None:
             infos, start = [], time.monotonic()
     loader.close()
 
-    outputs = predict(eval_step, best_params, val_frames, args, data_sharding)
-    final = summarize(outputs)
-    logging.info(
-        "held-out episodes, all frames, params of step %d: loss=%.4f mae=%.4f corr=%.4f",
-        best_step,
-        final["loss"],
-        final["mae"],
-        final["corr"],
-    )
-    episode_of = np.repeat(episodes["episode_index"].to_numpy(), lengths)
-    pd.DataFrame(
-        {
-            "episode_index": episode_of[outputs["index"]],
-            "frame_index": outputs["index"] - starts[episode_of[outputs["index"]]],
-            "return": outputs["target"],
-            "value": outputs["value"],
-        }
+    # Whole held-out episodes with the best params, for the value-curve plots.
+    final_frames = [split.frames(split.indices(split.val_episodes[: args.final_episodes])) for split in splits]
+    outputs = evaluate(eval_step, best_params, final_frames, args, data_sharding)
+    logging.info("held-out episodes, params of step %d:", best_step)
+    log_metrics("final", step, splits, [summarize(o) for o in outputs], args)
+    pd.concat(
+        [s.predictions(o["index"], o["target"], o["value"]) for s, o in zip(splits, outputs, strict=True)],
+        ignore_index=True,
     ).to_parquet(run_dir / "heldout_predictions.parquet", index=False)
     if args.wandb_enabled:
-        wandb.log({f"final/{key}": value for key, value in final.items()} | {"final/best_step": best_step}, step=step)
+        wandb.log({"final/best_step": best_step}, step=step)
         wandb.finish()
 
 
