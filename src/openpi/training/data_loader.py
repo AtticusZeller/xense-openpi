@@ -335,8 +335,22 @@ def create_rlds_dataset(
     )
 
 
-def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
-    """Transform the dataset by applying the data transforms."""
+def transform_dataset(
+    dataset: Dataset,
+    data_config: _config.DataConfig,
+    *,
+    skip_norm_stats: bool = False,
+    advantage_dropout: float | None = None,
+) -> Dataset:
+    """Transform the dataset by applying the data transforms.
+
+    Args:
+        dataset: The dataset to transform.
+        data_config: The data configuration.
+        skip_norm_stats: Whether to skip data normalization.
+        advantage_dropout: If set, the probability of dropping the advantage condition of a sample. It is
+            applied here and not in `model_transforms` because serving reuses those.
+    """
     norm_stats = {}
     if data_config.repo_id != "fake" and not skip_norm_stats:
         if data_config.norm_stats is None:
@@ -352,9 +366,17 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             *data_config.repack_transforms.inputs,
             *data_config.data_transforms.inputs,
             _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *([] if advantage_dropout is None else [_transforms.DropAdvantage(advantage_dropout)]),
             *data_config.model_transforms.inputs,
         ],
     )
+
+
+def _advantage_dropout(model_config: _model.BaseModelConfig) -> float | None:
+    """Returns the advantage condition dropout probability, or None if the model is not conditioned."""
+    if getattr(model_config, "advantage_conditioned", False):
+        return model_config.advantage_dropout  # type: ignore[attr-defined]
+    return None
 
 
 def transform_iterable_dataset(
@@ -409,6 +431,8 @@ def create_data_loader(
     logging.info("data_config: {data_config}")
 
     if data_config.rlds_data_dir is not None:
+        if _advantage_dropout(config.model) is not None:
+            raise NotImplementedError("Advantage conditioning is not supported by the RLDS data loader.")
         return create_rlds_data_loader(
             data_config,
             action_horizon=config.model.action_horizon,
@@ -468,7 +492,12 @@ def create_torch_data_loader(
         seed: The seed to use for shuffling the data.
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
-    dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    dataset = transform_dataset(
+        dataset,
+        data_config,
+        skip_norm_stats=skip_norm_stats,
+        advantage_dropout=_advantage_dropout(model_config),
+    )
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size

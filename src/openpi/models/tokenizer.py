@@ -10,6 +10,9 @@ from transformers import AutoProcessor
 import openpi.models.utils.fsq_tokenizer as fsq_tokenizer
 import openpi.shared.download as download
 
+# Text labels of the RECAP (pi*0.6) binarized advantage condition.
+ADVANTAGE_LABELS = ("positive", "negative")
+
 
 class PaligemmaTokenizer:
     def __init__(self, max_len: int = 48):
@@ -19,13 +22,31 @@ class PaligemmaTokenizer:
         with path.open("rb") as f:
             self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
 
-    def tokenize(self, prompt: str, state: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    def tokenize(
+        self, prompt: str, state: np.ndarray | None = None, advantage: str | None = None
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Tokenizes a prompt.
+
+        Args:
+            prompt: The task text.
+            state: Normalized state. When given, the Pi05 discrete-state format is used.
+            advantage: Optional RECAP advantage label, one of `ADVANTAGE_LABELS`. Only supported by the
+                Pi05 format. None leaves the prompt identical to the unconditioned Pi05 prompt.
+        """
+        if advantage is not None:
+            if advantage not in ADVANTAGE_LABELS:
+                raise ValueError(f"advantage must be one of {ADVANTAGE_LABELS} or None, got {advantage!r}")
+            if state is None:
+                raise ValueError("The advantage condition is only supported by the Pi05 discrete-state format.")
         cleaned_text = prompt.strip().replace("_", " ").replace("\n", " ")
         if state is not None:
             # This is the Pi05 format, where the state is part of the discrete language input.
             discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
             state_str = " ".join(map(str, discretized_state))
-            full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
+            # The advantage text goes after the pretrained prefix and right before the action, so the
+            # prefix the base model was trained on stays unchanged.
+            advantage_str = "" if advantage is None else f"Advantage: {advantage};\n"
+            full_prompt = f"Task: {cleaned_text}, State: {state_str};\n{advantage_str}Action: "
             tokens = self._tokenizer.encode(full_prompt, add_bos=True)
         else:
             # This is the Pi0 format, where the state is part of the continuous action expert input.

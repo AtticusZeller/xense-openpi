@@ -1,0 +1,47 @@
+# RECAP (pi*0.6) target-task initialization: SFT on demonstrations with the prompt carrying
+# "Advantage: positive" and the condition dropped for 30% of the samples. Identical to
+# pi05_base_bi_flexiv_cylinder_stack_1009_h100 except for the two advantage_* fields.
+# Do not set XLA_FLAGS; see docs/training-optimization.md.
+#   env -u LD_LIBRARY_PATH XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 \
+#   python scripts/train.py pi05_base_bi_flexiv_cylinder_stack_recap_h100 --exp-name=<experiment-name>
+lr_schedule:
+  type: CosineDecaySchedule
+  warmup_steps: 1000
+  peak_lr: 2.5e-5
+  decay_steps: 30000
+  decay_lr: 2.5e-6
+model:
+  type: Pi0Config
+  # Scanned 2026-11-14 over all 226,975 frames of this dataset (norm stats recomputed from every
+  # frame): the longest tokenized "Task: ..., State: ...;\nAdvantage: negative;\nAction: " prompt
+  # is 116 tokens (111 without the advantage text), so 128 leaves 12 spare. Truncation would cut the
+  # advantage text first. Re-scan when the dataset or prompt changes.
+  max_token_len: 128
+  pi05: true
+  discrete_state_input: true
+  advantage_conditioned: true
+  advantage_dropout: 0.3
+  enable_training_time_rtc: false
+  # Encode all three visual views in one SigLIP call.
+  batch_image_views: true
+weight_loader:
+  type: CheckpointWeightLoader
+  params_path: gs://openpi-assets/checkpoints/pi05_base/params
+ema_decay: null
+data:
+  type: LeRobotBiFlexivDataConfig
+  repo_id: Xense/cylinder-stack-0909
+  base_config:
+    prompt_from_task: true
+    tactile: false
+  default_prompt: Pick up and stack the cylinders on the red base in this order:pink,purple,orange,green
+batch_size: 256
+num_workers: 64
+num_train_steps: 60000
+# Whole-model grad/parameter norms are computed only on these logging steps.
+log_interval: 100
+save_interval: 10000
+keep_period: 10000
+fsdp_devices: 8
+strict_batch_order: false
+project_name: openpi

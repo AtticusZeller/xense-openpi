@@ -250,9 +250,29 @@ class AbsoluteActions(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class DropAdvantage(DataTransformFn):
+    """Drops the advantage condition of a sample with probability `prob` (RECAP condition dropout).
+
+    Training only: this must stay out of `model_transforms`, which serving reuses. It marks the sample
+    by setting `advantage` to None, which `TokenizePrompt` turns into the unconditioned prompt.
+    """
+
+    prob: float
+
+    def __call__(self, data: DataDict) -> DataDict:
+        # The global numpy RNG is seeded per worker by the torch DataLoader.
+        if np.random.random() < self.prob:
+            return {**data, "advantage": None}
+        return data
+
+
+@dataclasses.dataclass(frozen=True)
 class TokenizePrompt(DataTransformFn):
     tokenizer: _tokenizer.PaligemmaTokenizer
     discrete_state_input: bool = False
+    # If true, the prompt carries the sample's `advantage` label: "positive" when the sample has none,
+    # no advantage text when it is None.
+    advantage_conditioned: bool = False
 
     def __call__(self, data: DataDict) -> DataDict:
         if (prompt := data.pop("prompt", None)) is None:
@@ -267,7 +287,8 @@ class TokenizePrompt(DataTransformFn):
         if not isinstance(prompt, str):
             prompt = prompt.item()
 
-        tokens, token_masks = self.tokenizer.tokenize(prompt, state)
+        advantage = data.pop("advantage", "positive") if self.advantage_conditioned else None
+        tokens, token_masks = self.tokenizer.tokenize(prompt, state, advantage)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
 
 

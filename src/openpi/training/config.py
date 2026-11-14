@@ -162,6 +162,7 @@ class ModelTransformFactory(GroupFactory):
                         _transforms.TokenizePrompt(
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
+                            advantage_conditioned=model_config.advantage_conditioned,
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],

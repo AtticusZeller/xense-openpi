@@ -33,6 +33,11 @@ class Pi0Config(_model.BaseModelConfig):
     # Encode all camera views in one larger SigLIP batch. This is equivalent to
     # one encoder call per view but avoids repeated launches and FSDP parameter use.
     batch_image_views: bool = False
+    # RECAP (pi*0.6) advantage conditioning. Like `discrete_state_input`, these are read by the data
+    # pipeline, not by the model: the prompt gets "Advantage: <label>;\n" before "Action: ", and training
+    # drops that text with probability `advantage_dropout`. Requires `discrete_state_input`.
+    advantage_conditioned: bool = False
+    advantage_dropout: float = 0.3
     # training-time RTC config
     enable_training_time_rtc: bool = False
     max_delay: int = 10  # steps 330ms @ 30fps
@@ -42,6 +47,8 @@ class Pi0Config(_model.BaseModelConfig):
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
             object.__setattr__(self, "discrete_state_input", self.pi05)
+        if self.advantage_conditioned and not self.discrete_state_input:
+            raise ValueError("advantage_conditioned requires discrete_state_input (the Pi05 prompt format).")
 
     @property
     @override
