@@ -79,6 +79,8 @@ dev = [
     "matplotlib>=3.10.0",
 ]
 rlds = ["dlimp", "tensorflow-cpu>=2.19.0", "tensorflow-datasets>=4.9.9"]
+# RECAP value model (src/openpi/recap): Gemma3-270M language backbone from google-deepmind/gemma.
+recap = ["gemma==4.0.1"]
 
 [tool.uv]
 override-dependencies = [
