@@ -4,15 +4,19 @@ Reads the predictions written by scripts/recap/train_value.py and writes one PNG
 frames on top, the value and return curves over a background colored by advantage label, and the advantage
 below. The labels follow the RECAP rule: an N-step advantage estimate, positive above a per-task threshold.
 
+With `--videos` it also writes one MP4 per episode: the camera image inside a border in the color of its
+label, over a timeline of the episode's labels with a cursor.
+
 Usage:
     python scripts/recap/plot_value.py --predictions <run>/heldout_predictions.parquet \
-        --repo-id Xense/cylinder-stack-0909 --output-dir <dir> [--episodes 3 17]
+        --repo-id Xense/cylinder-stack-0909 --output-dir <dir> [--episodes 3 17] [--videos]
 """
 
 import dataclasses
 import logging
 import pathlib
 
+import av
 import matplotlib as mpl
 
 mpl.use("Agg")
@@ -22,9 +26,12 @@ import pandas as pd
 import tyro
 
 from openpi.recap import advantage as _advantage
+from openpi.recap import label_video as _label_video
 from openpi.training import data_loader as _data_loader
 
 _LABEL_COLORS = {True: "tab:green", False: "tab:red"}
+_VIDEO_BORDER = 8
+_VIDEO_STRIP_HEIGHT = 24
 
 
 @dataclasses.dataclass(frozen=True)
@@ -46,6 +53,8 @@ class Args:
     # Share of the frames labeled positive. The threshold is taken over every frame of this dataset in the
     # predictions, which is per task as long as the dataset holds one task.
     positive_fraction: float = 0.4
+    # Also write one MP4 per episode with every frame bordered in the color of its label.
+    videos: bool = False
 
 
 def frame_positions(length: int, num_frames: int) -> np.ndarray:
@@ -141,6 +150,48 @@ def plot_episode(
     return figure
 
 
+def load_frame(dataset: _data_loader.SelectiveVideoLeRobotDataset, index: int, camera_key: str) -> np.ndarray:
+    """Decodes one camera image of the dataset as HWC uint8."""
+    return (dataset[index][camera_key].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
+
+
+def write_video(
+    path: pathlib.Path,
+    episode: pd.DataFrame,
+    dataset: _data_loader.SelectiveVideoLeRobotDataset,
+    start: int,
+    camera_key: str,
+) -> None:
+    """Writes one episode as H.264 video with the label of every frame drawn on it.
+
+    Args:
+        path: Output MP4.
+        episode: Rows of one episode sorted by frame_index, with the columns episode_index, advantage, positive.
+        dataset: Dataset the frames are decoded from.
+        start: Dataset index of the episode's first frame.
+        camera_key: Camera to show.
+    """
+    positive, advantages = episode["positive"].to_numpy(), episode["advantage"].to_numpy()
+    episode_index = int(episode["episode_index"].iloc[0])
+    with av.open(str(path), "w") as container:
+        stream, strip = None, None
+        for position in range(len(episode)):
+            image = load_frame(dataset, start + position, camera_key)
+            if strip is None:
+                strip = _label_video.label_strip(positive, image.shape[1] + 2 * _VIDEO_BORDER, _VIDEO_STRIP_HEIGHT)
+            frame = _label_video.annotate_frame(
+                image, strip, position, len(episode), positive=bool(positive[position]), border=_VIDEO_BORDER,
+                caption=f"episode {episode_index}  t={position}  A={advantages[position]:+.4f}",
+            )  # fmt: skip
+            if stream is None:
+                # yuv420p needs even sizes; the border and the strip keep the parity of the camera image.
+                stream = container.add_stream("libx264", rate=dataset.meta.fps, options={"crf": "26"})
+                stream.height, stream.width, stream.pix_fmt = frame.shape[0], frame.shape[1], "yuv420p"
+            container.mux(stream.encode(av.VideoFrame.from_ndarray(frame, format="rgb24")))
+        if stream is not None:
+            container.mux(stream.encode())
+
+
 def main(args: Args) -> None:
     predictions = pd.read_parquet(args.predictions)
     if "dataset" in predictions:
@@ -169,13 +220,13 @@ def main(args: Args) -> None:
         if episode.empty:
             raise ValueError(f"Episode {episode_index} is not in {args.predictions}")
         positions = frame_positions(len(episode), args.num_frames)
-        frames = [
-            (dataset[starts[episode_index] + int(p)][args.camera_key].permute(1, 2, 0).numpy() * 255).astype(np.uint8)
-            for p in positions
-        ]
+        frames = [load_frame(dataset, starts[episode_index] + int(p), args.camera_key) for p in positions]
         figure = plot_episode(episode, frames, positions, threshold, f"episode {episode_index}")
         figure.savefig(args.output_dir / f"value_episode_{episode_index:04d}.png", dpi=130)
         plt.close(figure)
+        if args.videos:
+            video = args.output_dir / f"value_episode_{episode_index:04d}.mp4"
+            write_video(video, episode, dataset, starts[episode_index], args.camera_key)
 
 
 if __name__ == "__main__":
