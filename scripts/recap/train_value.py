@@ -74,6 +74,8 @@ class Args:
     patience: int = 3
     # Held-out episodes per dataset predicted in full at the end. Defaults to all of them.
     final_episodes: int | None = None
+    # Training episodes per dataset also predicted in full at the end, written to train_predictions.parquet.
+    final_train_episodes: int = 0
     num_workers: int = 32
     seed: int = 0
     wandb_enabled: bool = True
@@ -230,6 +232,27 @@ def log_metrics(prefix: str, step: int, splits: list[_value_data.Split], per_dat
     return mean
 
 
+def write_predictions(
+    prefix: str,
+    path: pathlib.Path,
+    episodes: list[np.ndarray],
+    step: int,
+    splits: list[_value_data.Split],
+    eval_step,
+    params,
+    args: Args,
+    sharding,
+) -> None:
+    """Predicts whole episodes of every dataset, logs their metrics as `prefix` and tabulates the predictions."""
+    frames = [split.frames(split.indices(e)) for split, e in zip(splits, episodes, strict=True)]
+    outputs = evaluate(eval_step, params, frames, args, sharding)
+    log_metrics(prefix, step, splits, [summarize(o) for o in outputs], args)
+    pd.concat(
+        [s.predictions(o["index"], o["target"], o["value"]) for s, o in zip(splits, outputs, strict=True)],
+        ignore_index=True,
+    ).to_parquet(path, index=False)
+
+
 def main(args: Args) -> None:
     roots = args.dataset_root or (None,) * len(args.repo_id)
     if not (len(args.repo_id) == len(args.returns) == len(roots)):
@@ -324,14 +347,23 @@ def main(args: Args) -> None:
     loader.close()
 
     # Whole held-out episodes with the best params, for the value-curve plots.
-    final_frames = [split.frames(split.indices(split.val_episodes[: args.final_episodes])) for split in splits]
-    outputs = evaluate(eval_step, best_params, final_frames, args, data_sharding)
     logging.info("held-out episodes, params of step %d:", best_step)
-    log_metrics("final", step, splits, [summarize(o) for o in outputs], args)
-    pd.concat(
-        [s.predictions(o["index"], o["target"], o["value"]) for s, o in zip(splits, outputs, strict=True)],
-        ignore_index=True,
-    ).to_parquet(run_dir / "heldout_predictions.parquet", index=False)
+    write_predictions(
+        "final",
+        run_dir / "heldout_predictions.parquet",
+        [split.val_episodes[: args.final_episodes] for split in splits],
+        step, splits, eval_step, best_params, args, data_sharding,
+    )  # fmt: skip
+    if args.final_train_episodes:
+        # The model has fitted these episodes; comparing them with the held-out ones shows how far its
+        # predictions on its own training data can be trusted.
+        logging.info("training episodes, params of step %d:", best_step)
+        write_predictions(
+            "final_train",
+            run_dir / "train_predictions.parquet",
+            [split.train_episodes[: args.final_train_episodes] for split in splits],
+            step, splits, eval_step, best_params, args, data_sharding,
+        )  # fmt: skip
     if args.wandb_enabled:
         wandb.log({"final/best_step": best_step}, step=step)
         wandb.finish()
