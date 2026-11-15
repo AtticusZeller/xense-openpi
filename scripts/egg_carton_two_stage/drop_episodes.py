@@ -164,8 +164,12 @@ def main() -> int:
         pq.write_table(table, out)
         episodes_tables.append(table)
 
-    from lerobot.datasets.utils import write_info
-    from lerobot.datasets.utils import write_stats
+    try:
+        from lerobot.datasets.io_utils import write_info
+        from lerobot.datasets.io_utils import write_stats
+    except ImportError:  # lerobot 0.4.2 keeps both in datasets.utils; 0.5.1 has them in io_utils.
+        from lerobot.datasets.utils import write_info
+        from lerobot.datasets.utils import write_stats
 
     shutil.copy2(src / "meta" / "tasks.parquet", dst / "meta" / "tasks.parquet")
     write_stats(aggregate_dataset_stats(episodes_tables, info["features"]), dst)
