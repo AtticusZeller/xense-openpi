@@ -3,7 +3,8 @@
 Reads metadata and parquet files only; nothing is modified. Reports
 
 * problems that make the dataset unusable as it is: episode metadata, `info.json` and `data/` disagreeing
-  (for example a leftover metadata file), or camera videos missing;
+  (for example a leftover metadata file), frames stored out of order, or camera videos missing; the script
+  exits with status 1 when it finds any;
 * suspect episodes for a person to review: far longer than the rest of the dataset, or with the robot
   standing still for most of the episode, at its start or at its end (a recording that was not stopped).
 
@@ -18,6 +19,7 @@ import dataclasses
 import json
 import logging
 import pathlib
+import sys
 
 import numpy as np
 import pandas as pd
@@ -65,11 +67,11 @@ def load_episodes(dataset_root: pathlib.Path) -> pd.DataFrame:
 
 
 def load_frames(dataset_root: pathlib.Path) -> pd.DataFrame:
-    """Loads `episode_index` and `observation.state` of every frame, in storage order."""
+    """Loads the indices and `observation.state` of every frame, in storage order."""
     files = sorted((dataset_root / "data").glob("*/*.parquet"))
     if not files:
         raise FileNotFoundError(f"No data files under {dataset_root / 'data'}")
-    columns = ["episode_index", "observation.state"]
+    columns = ["index", "episode_index", "frame_index", "observation.state"]
     return pd.concat([pd.read_parquet(file, columns=columns) for file in files], ignore_index=True)
 
 
@@ -122,7 +124,8 @@ def missing_videos(
             continue
         missing = [
             path
-            for c, f in episodes[[chunk, file]].drop_duplicates().itertuples(index=False)
+            # Rows of a metadata file written without video columns hold NaN here.
+            for c, f in episodes[[chunk, file]].dropna().astype(int).drop_duplicates().itertuples(index=False)
             if not (
                 dataset_root / (path := info["video_path"].format(video_key=camera, chunk_index=c, file_index=f))
             ).is_file()
@@ -197,6 +200,9 @@ def main(args: Args) -> None:
     info = json.loads((args.dataset_root / "meta" / "info.json").read_text())
     episodes, frames = load_episodes(args.dataset_root), load_frames(args.dataset_root)
     problems = metadata_problems(info, episodes, frames["episode_index"].to_numpy())
+    problems += _dataset_check.row_order_problems(
+        frames["index"].to_numpy(), frames["episode_index"].to_numpy(), frames["frame_index"].to_numpy()
+    )
     problems += missing_videos(args.dataset_root, info, episodes, args.cameras)
     for problem in problems:
         logging.error("PROBLEM %s", problem)
@@ -213,6 +219,8 @@ def main(args: Args) -> None:
         args.output.write_text(json.dumps(report, indent=2))
     if args.sheet_dir and len(suspects) and not problems:
         write_sheets(args, f"local/{args.dataset_root.name}", suspects, info["fps"])
+    if problems:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

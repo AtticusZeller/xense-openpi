@@ -8,6 +8,27 @@ functions find such episodes from the robot state alone; deciding what to drop s
 import numpy as np
 
 
+def row_order_problems(index: np.ndarray, episode_index: np.ndarray, frame_index: np.ndarray) -> list[str]:
+    """Lists the ways the stored frames are out of order.
+
+    Training looks frames up by row position, so the global index must count up from 0 and the frames of
+    every episode must sit together, in frame order, with the episodes in ascending order.
+
+    Args:
+        index: Global frame index of every stored row, in storage order.
+        episode_index: Episode of every stored row.
+        frame_index: Position of every stored row within its episode.
+    """
+    problems = []
+    if not np.array_equal(index, np.arange(len(index))):
+        problems.append("stored frames are not in the order of the global index 0..N-1")
+    starts = np.flatnonzero(np.r_[True, episode_index[1:] != episode_index[:-1]])
+    position = np.arange(len(episode_index)) - np.repeat(starts, np.diff(np.append(starts, len(episode_index))))
+    if (np.diff(episode_index) < 0).any() or not np.array_equal(frame_index, position):
+        problems.append("the frames of an episode are not stored together in frame order")
+    return problems
+
+
 def motion_spans(states: np.ndarray) -> np.ndarray:
     """Returns the range each state dimension covers over a dataset, from its 1st to its 99th percentile.
 

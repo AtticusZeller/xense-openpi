@@ -207,6 +207,15 @@ def main(args: Args) -> None:
             dataset.meta.episodes["episode_index"], dataset.meta.episodes["dataset_from_index"], strict=True
         )
     }
+    lengths = dict(zip(dataset.meta.episodes["episode_index"], dataset.meta.episodes["length"], strict=True))
+    for episode_index, length in predictions.groupby("episode_index").size().items():
+        if length != lengths[episode_index]:
+            # A copy of the dataset with episodes dropped numbers them differently; frames would then come
+            # from another episode than the curve.
+            raise ValueError(
+                f"Episode {episode_index} has {length} predicted frames but {lengths[episode_index]} frames in "
+                f"{dataset.root}: the predictions are cut short or were made on another copy of the dataset."
+            )
     statistics = label_statistics(predictions, dataset.meta.fps)
     logging.info(
         "%s: %d episodes, threshold=%.5f advantage_std=%.5f flips_per_second=%.2f median_positive_run=%.2fs",
