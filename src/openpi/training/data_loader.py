@@ -10,9 +10,11 @@ import jax
 import jax.numpy as jnp
 import lerobot.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
+import pandas as pd
 import torch
 
 import openpi.models.model as _model
+from openpi.recap import advantage_labels as _advantage_labels
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
@@ -341,6 +343,7 @@ def transform_dataset(
     *,
     skip_norm_stats: bool = False,
     advantage_dropout: float | None = None,
+    advantage_column: str | None = None,
 ) -> Dataset:
     """Transform the dataset by applying the data transforms.
 
@@ -350,6 +353,8 @@ def transform_dataset(
         skip_norm_stats: Whether to skip data normalization.
         advantage_dropout: If set, the probability of dropping the advantage condition of a sample. It is
             applied here and not in `model_transforms` because serving reuses those.
+        advantage_column: If set, the boolean dataset column every sample takes its advantage label from.
+            Without it a conditioned model sees every sample as positive.
     """
     norm_stats = {}
     if data_config.repo_id != "fake" and not skip_norm_stats:
@@ -360,12 +365,17 @@ def transform_dataset(
             )
         norm_stats = data_config.norm_stats
 
+    robot_transforms: list[_transforms.DataTransformFn] = [
+        *data_config.repack_transforms.inputs,
+        *data_config.data_transforms.inputs,
+        _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+    ]
+    if advantage_column is not None:
+        robot_transforms = [_transforms.WithAdvantageLabel(_transforms.compose(robot_transforms), advantage_column)]
     return TransformedDataset(
         dataset,
         [
-            *data_config.repack_transforms.inputs,
-            *data_config.data_transforms.inputs,
-            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *robot_transforms,
             *([] if advantage_dropout is None else [_transforms.DropAdvantage(advantage_dropout)]),
             *data_config.model_transforms.inputs,
         ],
@@ -377,6 +387,31 @@ def _advantage_dropout(model_config: _model.BaseModelConfig) -> float | None:
     if getattr(model_config, "advantage_conditioned", False):
         return model_config.advantage_dropout  # type: ignore[attr-defined]
     return None
+
+
+def _advantage_column(data_config: _config.DataConfig, model_config: _model.BaseModelConfig) -> str | None:
+    """Returns the dataset column a conditioned model reads its advantage labels from, if the dataset has one.
+
+    The labels are the ones scripts/recap/write_advantage_labels.py wrote into the dataset, so the dataset
+    named by the config decides which labels a run trains on. The share of positive frames is logged so that
+    a run started on the wrong dataset shows at once.
+    """
+    if _advantage_dropout(model_config) is None or data_config.repo_id in (None, "fake"):
+        return None
+    meta = lerobot_dataset.LeRobotDatasetMetadata(data_config.repo_id, root=_config.resolve_dataset_root(data_config))
+    if _advantage_labels.COLUMN not in meta.features:
+        logging.info(
+            f"Advantage condition: {data_config.repo_id!r} has no `{_advantage_labels.COLUMN}` column, "
+            "every frame is trained as positive."
+        )
+        return None
+    files = sorted((meta.root / "data").glob("*/*.parquet"))
+    labels = pd.concat([pd.read_parquet(file, columns=[_advantage_labels.COLUMN]) for file in files])
+    logging.info(
+        f"Advantage condition: labels from `{_advantage_labels.COLUMN}` of {data_config.repo_id!r}, "
+        f"{labels[_advantage_labels.COLUMN].mean():.1%} of {len(labels)} frames positive."
+    )
+    return _advantage_labels.COLUMN
 
 
 def transform_iterable_dataset(
@@ -497,6 +532,7 @@ def create_torch_data_loader(
         data_config,
         skip_norm_stats=skip_norm_stats,
         advantage_dropout=_advantage_dropout(model_config),
+        advantage_column=_advantage_column(data_config, model_config),
     )
 
     # Use TorchDataLoader for both frameworks

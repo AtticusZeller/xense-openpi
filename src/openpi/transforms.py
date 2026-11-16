@@ -250,6 +250,22 @@ class AbsoluteActions(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class WithAdvantageLabel(DataTransformFn):
+    """Applies `inner` and gives its output the advantage label that the raw sample holds in `column`.
+
+    The repack and robot transforms keep only the keys they know, so the label is read before them and
+    attached after them. `column` is a boolean dataset column: True is "positive", False "negative".
+    """
+
+    inner: DataTransformFn
+    column: str
+
+    def __call__(self, data: DataDict) -> DataDict:
+        positive = bool(np.asarray(data[self.column]))
+        return {**self.inner(data), "advantage": "positive" if positive else "negative"}
+
+
+@dataclasses.dataclass(frozen=True)
 class DropAdvantage(DataTransformFn):
     """Drops the advantage condition of a sample with probability `prob` (RECAP condition dropout).
 
