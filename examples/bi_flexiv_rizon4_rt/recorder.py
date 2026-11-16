@@ -15,6 +15,7 @@ Usage:
 """
 
 import pathlib
+import shutil
 from typing import override
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -190,7 +191,7 @@ class CollectionRecorderSubscriber(LeRobotRecorderSubscriber):
     @override
     def on_episode_end(self) -> None:
         if self._step_count > 0 and self._success is None:
-            self._dataset.clear_episode_buffer()
+            _discard_episode(self._dataset)
             logger.info(f"Episode ended without a success/failure label - {self._step_count} steps discarded")
             return
         if self._step_count > 0:
@@ -199,14 +200,36 @@ class CollectionRecorderSubscriber(LeRobotRecorderSubscriber):
         super().on_episode_end()
 
 
-def _episode_buffer(dataset: LeRobotDataset) -> dict:
-    """The frames added since the last save.
+def _episode_writer(dataset: LeRobotDataset):
+    """The object that holds the unsaved episode and its temporary images.
 
-    lerobot-xense (the robot host) keeps the buffer on the dataset; upstream lerobot 0.5
-    (the training environment, where the tests run) moved it to ``dataset.writer``.
+    lerobot-xense (the robot host) keeps both on the dataset; upstream lerobot 0.5 (the
+    training environment, where the tests run) moved them to ``dataset.writer``.
     """
-    holder = dataset if hasattr(dataset, "episode_buffer") else dataset.writer
-    return holder.episode_buffer  # pyright: ignore[reportOptionalMemberAccess]
+    return dataset if hasattr(dataset, "episode_buffer") else dataset.writer
+
+
+def _episode_buffer(dataset: LeRobotDataset) -> dict:
+    """The frames added since the last save."""
+    return _episode_writer(dataset).episode_buffer  # pyright: ignore[reportOptionalMemberAccess]
+
+
+def _discard_episode(dataset: LeRobotDataset) -> None:
+    """Drop the frames added since the last save, together with their camera images.
+
+    ``clear_episode_buffer`` deletes the temporary images of image features only. Cameras
+    recorded as video keep theirs, and a discarded episode takes no index, so the next
+    episode writes into the same directories: its videos would end with whatever frames
+    the discarded episode had beyond its length.
+    """
+    writer = _episode_writer(dataset)
+    episode_index = int(np.asarray(_episode_buffer(dataset)["episode_index"]).flat[0])
+    # Also waits for the image writer, so no frame lands after the directories are removed.
+    dataset.clear_episode_buffer()
+    for key in dataset.meta.video_keys:
+        image_dir = writer._get_image_file_dir(episode_index, key)  # pyright: ignore[reportOptionalMemberAccess]
+        if image_dir.is_dir():
+            shutil.rmtree(image_dir)
 
 
 def _create_dataset(

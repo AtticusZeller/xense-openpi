@@ -215,6 +215,29 @@ def test_only_labeled_episodes_are_saved_and_indices_stay_contiguous(collected):
     assert [len(actions) for actions in collected.run.bench.applied[:6]] == [7, 4, 11, STEP_LIMIT + 1, 6, 5]
 
 
+def test_videos_hold_exactly_the_frames_of_the_saved_episodes(collected):
+    # The episode that ran into the step limit is longer than the saved one after it and takes no
+    # index: its camera images must not end up at the tail of that episode's video.
+    dataset = collected.dataset
+    for index, episode in enumerate(collected.episodes):
+        meta = dataset.meta.episodes[index]
+        for key in dataset.meta.video_keys:
+            seconds = meta[f"videos/{key}/to_timestamp"] - meta[f"videos/{key}/from_timestamp"]
+            assert round(seconds * dataset.fps) == len(episode["frame_index"])
+    assert not list((collected.run.root / "images").rglob("*.png"))
+
+
+def test_face_buttons_stay_with_the_episode_control(tmp_path):
+    run = _collect(tmp_path, [Episode()], run=False)
+    controller = run.environment._collection_controller
+    run.bench.button_queue = deque([["B"]])
+    # InterventionPolicyAgent sends whatever consume_button_events returns to the policy server; on the
+    # robot the sampler thread can deliver a press between the environment's read and the agent's.
+    assert controller.consume_button_events() == []
+    assert controller.take_button_events() == ["B"]
+    run.recorder.finalize()
+
+
 def test_episode_success_is_constant_and_matches_the_button(collected):
     for episode, success in zip(collected.episodes, [True, True, False], strict=True):
         assert episode["episode_success"].dtype == np.bool_
