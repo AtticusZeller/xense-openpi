@@ -128,8 +128,9 @@ mamba run -n lerobot-xense python -m examples.bi_flexiv_rizon4_rt.main \
 
 #### Human intervention via Pico4 VR controllers
 
-Hold **both** Pico4 side (grip) buttons together to take over the robot from the
-policy mid-episode; release either grip to hand control back. While intervention
+Hold **either** Pico4 side (grip) button to take over the robot from the policy
+mid-episode (the other arm holds its pose and gripper); release both grips to hand
+control back. While intervention
 is active, policy inference is paused (no WebSocket round-trip to the server),
 and on release the `ActionChunkBroker` cache is cleared so the next step
 re-infers fresh from the current observation.
@@ -150,7 +151,7 @@ mamba run -n lerobot-xense python -m examples.bi_flexiv_rizon4_rt.main \
 
 Recommended first-run flow:
 
-1. `--args.dry-run --args.pico4-intervention` — hold both grips and confirm the printed 20D
+1. `--args.dry-run --args.pico4-intervention` — hold a grip and confirm the printed 20D
    action tracks the controller pose; release and confirm the next log shows the
    `Clearing ActionChunkBroker cache (intervention released).` line.
 2. Real run with `--args.stiffness-ratio 0.1` — verify the handoff does not snap the
@@ -161,14 +162,53 @@ Control scheme (inherited from `BiPico4`):
 
 | Input | Effect |
 |---|---|
-| Left + right grip held together | Both arms follow controller pose (intervention ON) |
-| Either grip released | Intervention OFF; policy resumes from the next observation |
+| Either grip held | That arm follows its controller pose (intervention ON) |
+| Both grips released | Intervention OFF; policy resumes from the next observation |
 | Left / right trigger | Respective gripper position while intervention is on |
 
 While intervention is active, every step's action dict carries `is_intervention: True`
-(and `False` otherwise). Recording subscribers ignore unknown keys, so enabling
-`--args.record` alongside `--args.pico4-intervention` is safe; dataset-level annotation of
-intervention segments is not yet wired into the recorder.
+(and `False` otherwise). The plain recorder ignores it, so enabling `--args.record`
+alongside `--args.pico4-intervention` is safe; to record it, use the collection mode below.
+
+A Pico4 fault (disconnect, stale packets, invalid pose or grip data) aborts the run
+instead of handing control back to the policy.
+
+#### RECAP rollout collection
+
+`--args.record-round <k>` (k ≥ 1; round 0 is the initial demonstrations) records policy
+rollouts with operator takeover for the π*0.6 improvement loop. It needs `--args.record`
+and `--args.pico4-intervention`, and runs only in the synchronous runtime (no
+`--args.rtc-enabled`, no `--args.action-hz`).
+
+```bash
+mamba run -n lerobot-xense python -m examples.bi_flexiv_rizon4_rt.main \
+    --args.robot-recipe forward-05 \
+    --args.host 10.142.1.1 --args.port 8000 \
+    --args.record --args.record-repo-id Xense/my_task_v1 --args.task "stack the cylinders" \
+    --args.pico4-intervention --args.record-round 1 --args.num-episodes 20
+```
+
+| Input | Effect |
+|---|---|
+| `A` | After the arms home: start the episode. During an episode: end it **unsaved** |
+| `B` | End the episode as a **success** |
+| `Y` | End the episode as a **failure** |
+| `X` | End the episode **unsaved** |
+| Grip held, then moved | Take over (the grip alone only arms it; 5 mm or 3° of controller motion starts it) |
+
+The step on which `B` / `Y` is read is the episode's last frame; the arms home afterwards and
+that motion is not recorded. Press `B` in the same scene state the demonstrations end in. An
+episode that ends without a label (`X`, `A`, `--args.max-episode-steps`, Ctrl+C) is dropped;
+it still counts towards `--args.num-episodes`.
+
+The dataset has three per-frame columns on top of the plain recording: `is_intervention`
+(the action of this frame came from the operator), `episode_success` (constant within an
+episode) and `round` (k). `action` is always the command sent to the robot.
+
+Videos are encoded as h264, the codec of the bi_flexiv demonstrations: LeRobot merges the
+rollouts with the demonstrations only when both use the same codec. Set
+`--args.record-vcodec` when the demonstrations of a task use another one. Plain
+`--args.record` is unaffected and keeps LeRobot's default codec.
 
 ---
 
@@ -254,5 +294,7 @@ examples/bi_flexiv_rizon4_rt/
 ├── env.py          # OpenPI Environment adapter (image resize, obs format)
 ├── real_env.py     # BiFlexivRizon4RT robot control wrapper
 ├── recorder.py     # LeRobot-format episode recorder subscriber
-└── intervention.py # Pico4 VR human-in-the-loop intervention wrappers
+├── intervention.py # Pico4 VR human-in-the-loop intervention wrappers
+├── button_edges.py # Debounced button edges and packet-health watchdog for the Pico4
+└── collection.py   # RECAP rollout collection: button-driven episodes on top of intervention
 ```

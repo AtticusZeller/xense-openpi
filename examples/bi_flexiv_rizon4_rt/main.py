@@ -52,9 +52,16 @@ Example usage:
         --args.robot-recipe forward-05 --args.host 192.168.2.100 --args.port 8000 \\
         --args.subscribe --args.subscribe-url ws://192.168.2.50:9100 --args.subscribe-hz 10
 
-    # Inference with Pico4 human intervention (both grips held → teleop takes over)
+    # Inference with Pico4 human intervention (either grip held → teleop takes over)
     python -m examples.bi_flexiv_rizon4_rt.main \\
         --args.robot-recipe forward-05 --args.host 192.168.2.100 --args.port 8000 --args.pico4-intervention
+
+    # RECAP rollout collection for round 1: Pico4 A starts each episode, B/Y end it as
+    # success/failure, X ends it unsaved (see collection.py)
+    python -m examples.bi_flexiv_rizon4_rt.main \\
+        --args.robot-recipe forward-05 --args.host 192.168.2.100 --args.port 8000 \\
+        --args.record --args.record-repo-id Xense/my_task_v1 --args.task "stack the cylinders" \\
+        --args.pico4-intervention --args.record-round 1 --args.num-episodes 20
 """
 
 from dataclasses import dataclass
@@ -76,6 +83,7 @@ from xense_client.runtime import environment as _environment
 from xense_client.runtime import runtime as _runtime
 from xense_client.runtime.agents import policy_agent as _policy_agent
 
+import examples.bi_flexiv_rizon4_rt.collection as _collection
 import examples.bi_flexiv_rizon4_rt.env as _env
 import examples.bi_flexiv_rizon4_rt.intervention as _intervention
 import examples.bi_flexiv_rizon4_rt.recipe as _recipe
@@ -280,8 +288,18 @@ class Args:
     record_repo_id: str = "Xense/recorded_dataset"
     record_root: str | None = None  # local save path, defaults to ~/.cache/huggingface/lerobot
     task: str = "pack 6 cosmetic bottles into the carton"
+    # RECAP rollout collection for improvement round k (>= 1; round 0 is the initial
+    # demonstrations). Each episode waits for Pico4 A after the arms home; B / Y end it as
+    # success / failure, X or A end it unsaved, and a held grip takes over only once the
+    # controller moves. The dataset gains the per-frame columns is_intervention,
+    # episode_success and round. Needs --args.record and --args.pico4-intervention.
+    record_round: int | None = None
+    # Video codec of a collection dataset (--args.record-round). It has to be the codec of the
+    # initial demonstrations, or LeRobot refuses to merge the rollouts with them. Plain
+    # --args.record keeps LeRobot's default codec.
+    record_vcodec: str = "h264"
 
-    # Pico4 human-in-the-loop intervention (hold both grips to take over)
+    # Pico4 human-in-the-loop intervention (hold either grip to take over)
     pico4_intervention: bool = False
     pico4_pos_sensitivity: float = 1.0
     pico4_ori_sensitivity: float = 1.0
@@ -294,6 +312,13 @@ def main(args: Args) -> None:
             "No bench selected. Pass --args.robot-recipe <name>, or --args.run <name> "
             f"for a run file that sets it. Recipes: {', '.join(_recipe.available_recipes())}."
         )
+
+    if args.record_round is not None:
+        if args.record_round < 1:
+            raise SystemExit("--record_round must be >= 1: round 0 is the initial demonstrations.")
+        if not (args.record and args.pico4_intervention):
+            # The two checks below then also keep collection off RTC and the decoupled runtime.
+            raise SystemExit("--record_round needs --record and --pico4_intervention.")
 
     if args.pico4_intervention and args.rtc_enabled:
         # RTCActionChunkBroker owns an execution queue + blending; its reset
@@ -356,17 +381,28 @@ def main(args: Args) -> None:
         environment = base_environment
 
     subscribers = []
+    collection_recorder: _recorder.CollectionRecorderSubscriber | None = None
     if args.record:
         if args.dry_run:
             logger.warn(
                 "Recording is enabled in dry-run mode — state/action data will be from policy output only (no real robot motion)"
             )
-        recorder = _recorder.make_recorder_subscriber(
-            repo_id=args.record_repo_id,
-            task=args.task,
-            fps=int(args.runtime_hz),
-            root=args.record_root,
-        )
+        if args.record_round is not None:
+            recorder = collection_recorder = _recorder.make_collection_recorder_subscriber(
+                repo_id=args.record_repo_id,
+                task=args.task,
+                round_index=args.record_round,
+                fps=int(args.runtime_hz),
+                root=args.record_root,
+                vcodec=args.record_vcodec,
+            )
+        else:
+            recorder = _recorder.make_recorder_subscriber(
+                repo_id=args.record_repo_id,
+                task=args.task,
+                fps=int(args.runtime_hz),
+                root=args.record_root,
+            )
         subscribers.append(recorder)
         logger.info(f"Recording enabled: repo_id={args.record_repo_id}, task='{args.task}'")
 
@@ -435,6 +471,7 @@ def main(args: Args) -> None:
         )
 
     intervention_controller: _intervention.Pico4InterventionController | None = None
+    episode_control: _collection.EpisodeControlEnvironment | None = None
     if args.pico4_intervention:
         teleop = BiPico4(
             BiPico4Config(
@@ -442,9 +479,19 @@ def main(args: Args) -> None:
                 ori_sensitivity=args.pico4_ori_sensitivity,
             )
         )
-        intervention_controller = _intervention.Pico4InterventionController(teleop, base_environment)
-        intervention_controller.start()
-        environment = _intervention.InterventionEnvironmentWrapper(environment, intervention_controller)
+        if collection_recorder is not None:
+            collection_controller = _collection.CollectionController(
+                teleop, base_environment, takeover_motion=_collection.TAKEOVER_MOTION
+            )
+            collection_controller.start()
+            intervention_controller = collection_controller
+            environment = episode_control = _collection.EpisodeControlEnvironment(
+                environment, collection_controller, on_label=collection_recorder.label_episode
+            )
+        else:
+            intervention_controller = _intervention.Pico4InterventionController(teleop, base_environment)
+            intervention_controller.start()
+            environment = _intervention.InterventionEnvironmentWrapper(environment, intervention_controller)
         agent = _intervention.InterventionPolicyAgent(
             inner_agent=_policy_agent.PolicyAgent(policy=policy),
             controller=intervention_controller,
@@ -505,6 +552,9 @@ def main(args: Args) -> None:
         _shutdown_in_progress.set()
         logger.info("Ctrl+C — stopping runtime gracefully (press Ctrl+C again to force exit)")
         runtime.request_stop()
+        if episode_control is not None:
+            # The runtime cannot interrupt the wait for Pico4 A; the episode control raises out of it.
+            episode_control.request_stop()
 
     signal.signal(signal.SIGINT, signal_handler)
 
@@ -519,7 +569,11 @@ def main(args: Args) -> None:
         traceback.print_exc()
         raise
     finally:
-        safe_disconnect()
+        try:
+            if collection_recorder is not None:
+                collection_recorder.finalize()
+        finally:
+            safe_disconnect()
 
 
 if __name__ == "__main__":
