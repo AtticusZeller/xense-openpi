@@ -68,3 +68,19 @@ def test_annotate_frame_draws_the_caption_inside_the_image():
 def test_annotate_frame_rejects_a_strip_of_the_wrong_width():
     with pytest.raises(ValueError, match="strip must be"):
         _label_video.annotate_frame(np.zeros((6, 10, 3), np.uint8), np.zeros((4, 10, 3), np.uint8), 0, 1, positive=True)
+
+
+def test_forced_frames_take_the_third_color_on_the_strip_and_the_border():
+    positive, forced = np.array([True, True, False, True]), np.array([False, True, False, True])
+    strip = _label_video.label_strip(positive, width=4, height=2, forced=forced)
+    assert [tuple(color) for color in strip[0]] == [
+        _label_video.POSITIVE_COLOR,
+        _label_video.FORCED_COLOR,
+        _label_video.NEGATIVE_COLOR,
+        _label_video.FORCED_COLOR,
+    ]
+
+    image = np.zeros((6, 4, 3), np.uint8)
+    wide = _label_video.label_strip(positive, width=8, height=2, forced=forced)
+    frame = _label_video.annotate_frame(image, wide, 1, 4, positive=True, forced=True, border=2)
+    assert tuple(frame[0, 0]) == _label_video.FORCED_COLOR

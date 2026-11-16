@@ -61,3 +61,68 @@ def test_label_runs():
     starts, ends = _advantage.label_runs(np.array([False]))
     np.testing.assert_array_equal(starts, [0])
     np.testing.assert_array_equal(ends, [1])
+
+
+def _mixed_frames():
+    """1000 frames: 400 initial, then 600 rollout of which every sixth is an intervention."""
+    advantages = np.random.default_rng(1).normal(size=1000)
+    # Initial and intervention frames sit far below every threshold, so only the rule can make them positive.
+    initial = np.arange(1000) < 400
+    intervention = ~initial & (np.arange(1000) % 6 == 0)
+    advantages[initial | intervention] -= 10.0
+    return advantages, initial, intervention
+
+
+@pytest.mark.parametrize("threshold_frames", ["rollout", "all"])
+def test_initial_and_intervention_frames_are_positive_whatever_their_advantage(threshold_frames):
+    advantages, initial, intervention = _mixed_frames()
+    positive, source, _ = _advantage.label_frames(advantages, initial, intervention, 0.4, threshold_frames)
+
+    assert positive[initial].all()
+    assert positive[intervention].all()
+    assert (source[initial] == "initial").all()
+    assert (source[intervention] == "intervention").all()
+    assert (source[~initial & ~intervention] == "value").all()
+
+
+def test_rollout_threshold_leaves_the_given_fraction_of_the_policy_frames_positive():
+    advantages, initial, intervention = _mixed_frames()
+    positive, source, threshold = _advantage.label_frames(advantages, initial, intervention, 0.4, "rollout")
+
+    by_value = source == "value"
+    assert positive[by_value].mean() == pytest.approx(0.4, abs=2e-3)
+    assert threshold == _advantage.positive_threshold(advantages[by_value], 0.4)
+    np.testing.assert_array_equal(positive[by_value], advantages[by_value] > threshold)
+
+
+def test_all_threshold_is_the_quantile_of_every_frame():
+    advantages, initial, intervention = _mixed_frames()
+    positive, source, threshold = _advantage.label_frames(advantages, initial, intervention, 0.4, "all")
+
+    assert threshold == _advantage.positive_threshold(advantages, 0.4)
+    by_value = source == "value"
+    np.testing.assert_array_equal(positive[by_value], advantages[by_value] > threshold)
+    # The forced frames hold the lowest advantages here, so the 40% above the threshold are all policy frames.
+    assert positive[by_value].sum() == 400
+
+
+def test_dataset_of_initial_demonstrations_is_all_positive_without_a_threshold():
+    positive, source, threshold = _advantage.label_frames(
+        np.linspace(-1, 1, 10), np.ones(10, bool), np.zeros(10, bool), 0.4, "rollout"
+    )
+    assert positive.all()
+    assert (source == "initial").all()
+    assert np.isnan(threshold)
+
+
+def test_label_frames_reject_bad_input():
+    with pytest.raises(ValueError, match="equally long"):
+        _advantage.label_frames(np.zeros(3), np.zeros(4, bool), np.zeros(3, bool), 0.4)
+    with pytest.raises(ValueError, match="threshold_frames"):
+        _advantage.label_frames(np.zeros(3), np.zeros(3, bool), np.zeros(3, bool), 0.4, "episode")
+
+
+def test_label_runs_split_more_than_two_labels():
+    starts, ends = _advantage.label_runs(np.array([2, 2, 0, 1, 1]))
+    np.testing.assert_array_equal(starts, [0, 2, 3])
+    np.testing.assert_array_equal(ends, [2, 3, 5])

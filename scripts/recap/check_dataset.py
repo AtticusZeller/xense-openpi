@@ -3,10 +3,13 @@
 Reads metadata and parquet files only; nothing is modified. Reports
 
 * problems that make the dataset unusable as it is: episode metadata, `info.json` and `data/` disagreeing
-  (for example a leftover metadata file), frames stored out of order, or camera videos missing; the script
-  exits with status 1 when it finds any;
+  (for example a leftover metadata file), frames stored out of order, camera videos missing, or the
+  collection columns (`is_intervention`, `episode_success`, `round`) contradicting their definition; the
+  script exits with status 1 when it finds any;
 * suspect episodes for a person to review: far longer than the rest of the dataset, or with the robot
   standing still for most of the episode, at its start or at its end (a recording that was not stopped).
+
+A dataset with the collection columns also gets a per-round count of episodes, failures and interventions.
 
 With `--sheet-dir` it also decodes a row of frames per suspect episode. Nothing is dropped; use
 scripts/recap/drop_episodes.py for that.
@@ -25,6 +28,7 @@ import numpy as np
 import pandas as pd
 import tyro
 
+from openpi.recap import collection_columns as _collection_columns
 from openpi.recap import dataset_check as _dataset_check
 
 
@@ -135,6 +139,27 @@ def missing_videos(
     return problems
 
 
+def check_collection_columns(dataset_root: pathlib.Path, info: dict) -> list[str]:
+    """Checks the collection columns and logs the per-round counts; a dataset without them is not checked."""
+    present = [column for column in _collection_columns.COLUMNS if column in info["features"]]
+    if not present:
+        logging.info("No collection columns: every episode counts as a successful initial demonstration.")
+        return []
+    if len(present) < len(_collection_columns.COLUMNS):
+        return [f"only {present} of the collection columns {list(_collection_columns.COLUMNS)} are present"]
+    files = sorted((dataset_root / "data").glob("*/*.parquet"))
+    columns = ["episode_index", *_collection_columns.COLUMNS]
+    frames = pd.concat([pd.read_parquet(file, columns=columns) for file in files], ignore_index=True)
+    episodes = _collection_columns.episode_table(frames)
+    for row in _collection_columns.round_summary(episodes).itertuples():
+        logging.info(
+            "round %d: %d episodes, %d failures, %d episodes with intervention, %.1f%% of %d frames are intervention",
+            row.round, row.episodes, row.failures, row.episodes_with_intervention, 100 * row.intervention_share,
+            row.frames,
+        )  # fmt: skip
+    return _collection_columns.collection_problems(episodes)
+
+
 def suspect_episodes(episodes: pd.DataFrame, frames: pd.DataFrame, fps: float, args: Args) -> pd.DataFrame:
     """Measures every episode and returns the suspect ones with the reasons, longest standstill first."""
     states = np.stack(frames["observation.state"].to_numpy()).astype(np.float64)
@@ -204,6 +229,7 @@ def main(args: Args) -> None:
         frames["index"].to_numpy(), frames["episode_index"].to_numpy(), frames["frame_index"].to_numpy()
     )
     problems += missing_videos(args.dataset_root, info, episodes, args.cameras)
+    problems += check_collection_columns(args.dataset_root, info)
     for problem in problems:
         logging.error("PROBLEM %s", problem)
     suspects = suspect_episodes(episodes, frames, info["fps"], args)
