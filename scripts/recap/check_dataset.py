@@ -143,7 +143,7 @@ def check_collection_columns(dataset_root: pathlib.Path, info: dict) -> list[str
     """Checks the collection columns and logs the per-round counts; a dataset without them is not checked."""
     present = [column for column in _collection_columns.COLUMNS if column in info["features"]]
     if not present:
-        logging.info("No collection columns: every episode counts as a successful initial demonstration.")
+        logging.info("No collection columns: their check is skipped. Labeling advantages needs them.")
         return []
     if len(present) < len(_collection_columns.COLUMNS):
         return [f"only {present} of the collection columns {list(_collection_columns.COLUMNS)} are present"]

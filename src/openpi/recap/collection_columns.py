@@ -37,20 +37,22 @@ def initial_demonstration_columns(num_frames: int) -> dict[str, np.ndarray]:
 def load_frames(dataset_root: pathlib.Path) -> pd.DataFrame:
     """Loads `episode_index`, `frame_index` and the three columns of every frame, in storage order.
 
-    A dataset without the columns holds initial demonstrations and gets their values.
+    Raises:
+        ValueError: When the dataset lacks any of the columns. Guessing them would label a rollout
+            recorded without them as initial demonstrations, that is, every frame positive.
     """
     info = json.loads((dataset_root / "meta" / "info.json").read_text())
-    present = [column for column in COLUMNS if column in info["features"]]
-    if present and len(present) < len(COLUMNS):
-        raise ValueError(f"{dataset_root} has only {present} of the collection columns {list(COLUMNS)}")
+    missing = [column for column in COLUMNS if column not in info["features"]]
+    if missing:
+        raise ValueError(
+            f"{dataset_root} lacks the collection columns {missing}. Rollouts get them from collection mode "
+            "(--args.record-round), initial demonstrations from scripts/recap/mark_initial_dataset.py."
+        )
     files = sorted((dataset_root / "data").glob("*/*.parquet"))
     if not files:
         raise FileNotFoundError(f"No data files under {dataset_root / 'data'}")
-    columns = ["episode_index", "frame_index", *present]
-    frames = pd.concat([pd.read_parquet(file, columns=columns) for file in files], ignore_index=True)
-    if not present:
-        frames = frames.assign(**initial_demonstration_columns(len(frames)))
-    return frames
+    columns = ["episode_index", "frame_index", *COLUMNS]
+    return pd.concat([pd.read_parquet(file, columns=columns) for file in files], ignore_index=True)
 
 
 def episode_table(frames: pd.DataFrame) -> pd.DataFrame:

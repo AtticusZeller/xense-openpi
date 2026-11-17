@@ -1,5 +1,8 @@
+import json
+
 import numpy as np
 import pandas as pd
+import pytest
 
 from openpi.recap import collection_columns as _collection_columns
 
@@ -67,3 +70,14 @@ def test_intervention_in_an_initial_demonstration_is_a_problem():
     frames.loc[frames.index[frames["episode_index"] == 1][2], "is_intervention"] = True
     problems = _collection_columns.collection_problems(_collection_columns.episode_table(frames))
     assert problems == ["initial demonstrations (round 0) with intervention frames: episodes [1]"]
+
+
+@pytest.mark.parametrize("present", [(), ("is_intervention", "round")])
+def test_frames_of_a_dataset_lacking_a_column_are_not_guessed(tmp_path, present):
+    # A rollout recorded without collection mode has none of the columns; taking it for initial
+    # demonstrations would label every one of its frames positive.
+    (tmp_path / "meta").mkdir()
+    features = {"action": {}, **{name: _collection_columns.COLLECTION_FEATURES[name] for name in present}}
+    (tmp_path / "meta" / "info.json").write_text(json.dumps({"features": features}))
+    with pytest.raises(ValueError, match=r"lacks the collection columns .*episode_success"):
+        _collection_columns.load_frames(tmp_path)

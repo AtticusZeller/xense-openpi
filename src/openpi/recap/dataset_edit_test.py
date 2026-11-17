@@ -116,6 +116,14 @@ def test_marking_leaves_the_source_untouched_and_refuses_an_existing_destination
         _dataset_edit.mark_initial_demonstrations(roots["demos"], roots["marked"])
 
 
+def test_demonstrations_can_be_labeled_only_once_they_are_marked(roots):
+    with pytest.raises(ValueError, match="lacks the collection columns"):
+        _collection_columns.load_frames(roots["demos"])
+    marked = _collection_columns.load_frames(roots["marked"])
+    assert len(marked) == 12
+    assert (marked["round"] == 0).all()
+
+
 def test_merged_dataset_keeps_every_frame_of_both_sources(roots):
     demos, rollouts, merged = (_columns(roots[name]) for name in ("marked", "rollouts", "merged"))
     split = len(demos["index"])

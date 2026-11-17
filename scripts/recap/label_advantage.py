@@ -2,8 +2,8 @@
 
 The dataset is not modified. Frames of the initial demonstrations (`round == 0`) and frames the operator
 executed (`is_intervention`) are positive; every other frame is positive when its N-step advantage exceeds a
-threshold (`openpi.recap.advantage.label_frames`). A dataset without the collection columns holds initial
-demonstrations only.
+threshold (`openpi.recap.advantage.label_frames`). A dataset without the collection columns is rejected:
+rollouts get them from collection mode, initial demonstrations from scripts/recap/mark_initial_dataset.py.
 
 The value predictions must cover every frame of the dataset. scripts/recap/train_value.py writes the
 held-out episodes to `heldout_predictions.parquet` and, with `--final-train-episodes`, the training episodes
