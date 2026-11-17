@@ -19,8 +19,10 @@ from __future__ import annotations
 
 from collections.abc import Callable
 import math
+import os
+import threading
 import time
-from typing import override
+from typing import Any, override
 
 from lerobot.utils.robot_utils import get_logger
 import numpy as np
@@ -135,3 +137,46 @@ class EpisodeControlEnvironment(_intervention.InterventionEnvironmentWrapper):
             logger.info(f"Pico4 {button}: episode ends as a {'success' if success else 'failure'}.")
         else:
             logger.info(f"Pico4 {button}: episode ends unsaved.")
+
+
+def stop_on_sigint(
+    runtime: Any,
+    episode_control: EpisodeControlEnvironment | None = None,
+    recorder: Any = None,
+    force_exit: Callable[[int], Any] = os._exit,
+) -> Callable[[int, Any], None]:
+    """Returns the SIGINT handler of a run.
+
+    The first Ctrl+C asks the runtime to wind down (DecoupledRuntime joins its action and
+    observation threads, ~0.5 s), so that main's ``finally`` closes the dataset and homes the
+    arms via MoveJ before releasing the SDK. A second Ctrl+C while that is in progress exits
+    at once, accepting that the arms may not return home.
+
+    Args:
+        runtime: The runtime to stop.
+        episode_control: Collection mode's episode control, which waits for Pico4 A outside
+            the runtime's reach.
+        recorder: Collection mode's recorder. The forced exit closes it first: LeRobot writes
+            the parquet footers only on ``finalize``, and without them no episode saved in
+            this session can be read.
+        force_exit: Ends the process without running ``finally`` blocks.
+    """
+    shutdown_in_progress = threading.Event()
+
+    def handler(sig: int, frame: Any) -> None:
+        if shutdown_in_progress.is_set():
+            logger.warn("Second Ctrl+C — forcing exit. Arms may not return home cleanly.")
+            if recorder is not None:
+                try:
+                    recorder.finalize()
+                except Exception as e:
+                    logger.warn(f"Could not close the dataset before the forced exit: {e}")
+            force_exit(1)
+        shutdown_in_progress.set()
+        logger.info("Ctrl+C — stopping runtime gracefully (press Ctrl+C again to force exit)")
+        runtime.request_stop()
+        if episode_control is not None:
+            # The runtime cannot interrupt the wait for Pico4 A; the episode control raises out of it.
+            episode_control.request_stop()
+
+    return handler

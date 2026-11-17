@@ -65,10 +65,8 @@ Example usage:
 """
 
 from dataclasses import dataclass
-import os
 import pathlib
 import signal
-import threading
 from typing import override
 
 from lerobot.teleoperators.bi_pico4 import BiPico4
@@ -537,26 +535,7 @@ def main(args: Args) -> None:
         except Exception as e:
             logger.warn(f"Error disconnecting: {e}")
 
-    # SIGINT handling: first press asks the runtime to wind down threads
-    # cleanly (DecoupledRuntime joins its action + obs threads here, ~0.5 s);
-    # main's `finally` then runs safe_disconnect, which homes the arms via
-    # MoveJ before releasing the SDK — same end-state as the original
-    # synchronous runtime. A second Ctrl+C while shutdown is in progress
-    # escapes to os._exit, accepting that the arms may not return home.
-    _shutdown_in_progress = threading.Event()
-
-    def signal_handler(sig, frame):
-        if _shutdown_in_progress.is_set():
-            logger.warn("Second Ctrl+C — forcing exit. Arms may not return home cleanly.")
-            os._exit(1)
-        _shutdown_in_progress.set()
-        logger.info("Ctrl+C — stopping runtime gracefully (press Ctrl+C again to force exit)")
-        runtime.request_stop()
-        if episode_control is not None:
-            # The runtime cannot interrupt the wait for Pico4 A; the episode control raises out of it.
-            episode_control.request_stop()
-
-    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGINT, _collection.stop_on_sigint(runtime, episode_control, collection_recorder))
 
     try:
         runtime.run()

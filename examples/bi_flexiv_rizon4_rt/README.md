@@ -199,7 +199,8 @@ mamba run -n lerobot-xense python -m examples.bi_flexiv_rizon4_rt.main \
 The step on which `B` / `Y` is read is the episode's last frame; the arms home afterwards and
 that motion is not recorded. Press `B` in the same scene state the demonstrations end in. An
 episode that ends without a label (`X`, `A`, `--args.max-episode-steps`, Ctrl+C) is dropped;
-it still counts towards `--args.num-episodes`.
+it still counts towards `--args.num-episodes`. One Ctrl+C stops and homes the arms; a second
+one while they home exits at once, and the episodes saved so far stay readable.
 
 The dataset has three per-frame columns on top of the plain recording: `is_intervention`
 (the action of this frame came from the operator), `episode_success` (constant within an

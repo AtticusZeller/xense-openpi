@@ -7,6 +7,7 @@ real LeRobotDataset that the assertions read back.
 
 from collections import deque
 import logging
+import signal
 from types import SimpleNamespace
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -74,7 +75,8 @@ class Bench:
         self.applied[-1].append(np.asarray(action["actions"], dtype=np.float32).copy())
         self.step += 1
         if self.step in self.episode.press:
-            self.button_queue.append([self.episode.press[self.step]])
+            pressed = self.episode.press[self.step]
+            self.button_queue.append(pressed if isinstance(pressed, list) else [pressed])
 
     # --- Pico4ButtonMonitor ---
     def poll(self):
@@ -303,6 +305,62 @@ def test_episode_interrupted_by_the_runtime_is_not_saved(tmp_path):
     run.recorder.finalize()
     assert len(run.bench.applied[0]) == 3
     assert run.recorder._dataset.meta.total_episodes == 0
+
+
+class _ForcedExit(BaseException):
+    """Stands in for os._exit: nothing after it runs, in particular not main's ``finally``."""
+
+
+def _forced_exit(code):
+    raise _ForcedExit
+
+
+def test_second_interrupt_while_the_arms_home_leaves_the_saved_episodes_readable(tmp_path):
+    run = _collect(tmp_path, [Episode(press={6: "B"}), Episode()], run=False)
+    interrupt = collection.stop_on_sigint(run.runtime, run.environment, run.recorder, force_exit=_forced_exit)
+    bench_apply, bench_reset = run.bench.apply_action, run.bench.reset
+
+    def apply_then_interrupt(action):
+        bench_apply(action)
+        if len(run.bench.applied) == 2 and run.bench.step == 3:
+            interrupt(signal.SIGINT, None)
+
+    def reset_then_interrupt():
+        bench_reset()
+        if len(run.bench.applied) == 3:  # the homing after the last episode
+            interrupt(signal.SIGINT, None)
+
+    run.bench.apply_action, run.bench.reset = apply_then_interrupt, reset_then_interrupt
+    with pytest.raises(_ForcedExit):
+        run.runtime.run()
+    # Nothing closes the dataset after the forced exit; LeRobot writes the parquet footers on finalize.
+    _, episodes = _read(run.root)
+    assert [len(episode["frame_index"]) for episode in episodes] == [7]
+
+
+@pytest.mark.parametrize(
+    ("episode", "frames", "success"),
+    [
+        # Presses made before the episode started do not label it.
+        (Episode(press={4: "B"}, stale=["Y"], gate=["Y", "A"]), 5, True),
+        # Of two buttons read on one step the first one ends the episode.
+        (Episode(press={4: ["Y", "B"]}), 5, False),
+        # A label on the very step the step limit is reached still counts.
+        (Episode(press={STEP_LIMIT: "B"}), STEP_LIMIT + 1, True),
+    ],
+)
+def test_the_first_button_of_the_running_episode_decides(tmp_path, episode, frames, success):
+    _, episodes = _read(_collect(tmp_path, [episode]).root)
+    assert [len(saved["frame_index"]) for saved in episodes] == [frames]
+    assert episodes[0]["episode_success"].tolist() == [success] * frames
+
+
+def test_grip_still_held_from_the_last_episode_does_not_take_over_until_it_moves_again(tmp_path):
+    held = {"grip_from": 0, "release_at": STEP_LIMIT + 1}
+    run = _collect(tmp_path, [Episode(press={8: "B"}, move_from=4, **held), Episode(press={6: "B"}, **held)])
+    _, (first, second) = _read(run.root)
+    assert np.flatnonzero(first["is_intervention"]).tolist() == [4, 5, 6, 7, 8]
+    assert not second["is_intervention"].any()
 
 
 def test_recorded_columns_are_the_ones_the_training_side_merges_and_checks():
