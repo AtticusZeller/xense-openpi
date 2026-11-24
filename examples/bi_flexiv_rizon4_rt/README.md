@@ -176,9 +176,9 @@ instead of handing control back to the policy.
 #### RECAP rollout collection
 
 `--args.record-round <k>` (k ≥ 1; round 0 is the initial demonstrations) records policy
-rollouts with operator takeover for the π*0.6 improvement loop. It needs `--args.record`
-and `--args.pico4-intervention`, and runs only in the synchronous runtime (no
-`--args.rtc-enabled`, no `--args.action-hz`).
+rollouts for the π*0.6 improvement loop. It needs `--args.record` and runs only in the
+synchronous runtime (no `--args.action-hz`). With `--args.pico4-intervention` the operator
+can take over, and `--args.rtc-enabled` is refused.
 
 ```bash
 mamba run -n lerobot-xense python -m examples.bi_flexiv_rizon4_rt.main \
@@ -201,6 +201,21 @@ that motion is not recorded. Press `B` in the same scene state the demonstration
 episode that ends without a label (`X`, `A`, `--args.max-episode-steps`, Ctrl+C) is dropped;
 it still counts towards `--args.num-episodes`. One Ctrl+C stops and homes the arms; a second
 one while they home exits at once, and the episodes saved so far stay readable.
+
+Without `--args.pico4-intervention` nobody takes over, `--args.rtc-enabled` is allowed, and
+the client's terminal drives each episode instead of the Pico4 (`is_intervention` is False on
+every frame). [`runs/pack-iphone-box-collect.yaml`](runs/pack-iphone-box-collect.yaml) is such
+a run:
+
+| Typed, then Enter | Effect |
+|---|---|
+| (nothing) | After the arms home: start the episode |
+| `s` | End the episode as a **success** |
+| `f` | End the episode as a **failure** |
+| `x` | End the episode **unsaved** |
+
+The other rules above hold: the step on which the line is read is the last frame, and input
+typed while the arms home is ignored.
 
 The dataset has three per-frame columns on top of the plain recording: `is_intervention`
 (the action of this frame came from the operator), `episode_success` (constant within an

@@ -287,10 +287,13 @@ class Args:
     record_root: str | None = None  # local save path, defaults to ~/.cache/huggingface/lerobot
     task: str = "pack 6 cosmetic bottles into the carton"
     # RECAP rollout collection for improvement round k (>= 1; round 0 is the initial
-    # demonstrations). Each episode waits for Pico4 A after the arms home; B / Y end it as
-    # success / failure, X or A end it unsaved, and a held grip takes over only once the
-    # controller moves. The dataset gains the per-frame columns is_intervention,
-    # episode_success and round. Needs --args.record and --args.pico4-intervention.
+    # demonstrations). With --args.pico4-intervention each episode waits for Pico4 A after
+    # the arms home; B / Y end it as success / failure, X or A end it unsaved, and a held
+    # grip takes over only once the controller moves. Without it nobody takes over, RTC is
+    # allowed, and the terminal drives the episode: Enter starts it, s / f / x + Enter end it
+    # as success / failure / unsaved. The dataset gains the per-frame columns
+    # is_intervention, episode_success and round. Needs --args.record and the synchronous
+    # runtime (--args.action-hz 0).
     record_round: int | None = None
     # Video codec of a collection dataset (--args.record-round). It has to be the codec of the
     # initial demonstrations, or LeRobot refuses to merge the rollouts with them. Plain
@@ -314,9 +317,12 @@ def main(args: Args) -> None:
     if args.record_round is not None:
         if args.record_round < 1:
             raise SystemExit("--record_round must be >= 1: round 0 is the initial demonstrations.")
-        if not (args.record and args.pico4_intervention):
-            # The two checks below then also keep collection off RTC and the decoupled runtime.
-            raise SystemExit("--record_round needs --record and --pico4_intervention.")
+        if not args.record:
+            raise SystemExit("--record_round needs --record.")
+        if args.action_hz > 0:
+            # The wait for the episode start blocks get_observation, which the decoupled runtime
+            # calls from its observation thread while the action thread keeps driving the arms.
+            raise SystemExit("--record_round runs in the synchronous runtime; set --action_hz 0.")
 
     if args.pico4_intervention and args.rtc_enabled:
         # RTCActionChunkBroker owns an execution queue + blending; its reset
@@ -393,6 +399,7 @@ def main(args: Args) -> None:
                 fps=int(args.runtime_hz),
                 root=args.record_root,
                 vcodec=args.record_vcodec,
+                takeover=args.pico4_intervention,
             )
         else:
             recorder = _recorder.make_recorder_subscriber(
@@ -469,7 +476,7 @@ def main(args: Args) -> None:
         )
 
     intervention_controller: _intervention.Pico4InterventionController | None = None
-    episode_control: _collection.EpisodeControlEnvironment | None = None
+    episode_control: _collection.EpisodeControlEnvironment | _collection.KeyboardEpisodeControlEnvironment | None = None
     if args.pico4_intervention:
         teleop = BiPico4(
             BiPico4Config(
@@ -497,6 +504,10 @@ def main(args: Args) -> None:
         )
     else:
         agent = _policy_agent.PolicyAgent(policy=policy)
+        if collection_recorder is not None:
+            environment = episode_control = _collection.KeyboardEpisodeControlEnvironment(
+                environment, _collection.TerminalLines().start(), on_label=collection_recorder.label_episode
+            )
 
     if decoupled_mode:
         logger.info(f"Decoupled runtime: obs at ~{args.runtime_hz} Hz (camera-bound), action at {args.action_hz} Hz")

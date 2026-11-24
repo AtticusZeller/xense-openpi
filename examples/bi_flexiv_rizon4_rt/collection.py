@@ -1,7 +1,8 @@
 """RECAP rollout collection on the bench: button-driven episodes with step-level takeover.
 
-Entered from ``main.py`` with ``--args.record-round <k>``. The policy runs in the
-synchronous runtime (no RTC) and the operator drives each episode from the Pico4:
+Entered from ``main.py`` with ``--args.record-round <k>``. With ``--args.pico4-intervention``
+the policy runs in the synchronous runtime (no RTC) and the operator drives each episode from
+the Pico4:
 
 - ``A``: once the arms have homed, start the episode; during an episode, end it unsaved.
 - ``B``: end the episode as a success.
@@ -13,6 +14,10 @@ The step on which ``B`` or ``Y`` is read is the episode's last recorded frame; t
 home afterwards, unrecorded. The return of a frame counts the steps left until the
 episode ends, so recording the homing motion would shift it. An episode that ends
 without a label (``X``, ``A``, the step limit, Ctrl+C) is not saved.
+
+Without ``--args.pico4-intervention`` nobody takes over, RTC is allowed, and the episode is
+driven from the client's terminal instead (``KeyboardEpisodeControlEnvironment``): Enter
+starts it, ``s`` / ``f`` / ``x`` and Enter end it as a success / failure / unsaved.
 """
 
 from __future__ import annotations
@@ -20,6 +25,8 @@ from __future__ import annotations
 from collections.abc import Callable
 import math
 import os
+import queue
+import sys
 import threading
 import time
 from typing import Any, override
@@ -139,9 +146,120 @@ class EpisodeControlEnvironment(_intervention.InterventionEnvironmentWrapper):
             logger.info(f"Pico4 {button}: episode ends unsaved.")
 
 
+class TerminalLines:
+    """Lines typed into the client's terminal, read on a daemon thread so the control loop never blocks."""
+
+    def __init__(self, stream: Any = None) -> None:
+        self._stream = stream
+        self._lines: queue.SimpleQueue[str] = queue.SimpleQueue()
+
+    def start(self) -> TerminalLines:
+        threading.Thread(target=self._read, name="terminal-lines", daemon=True).start()
+        return self
+
+    def take(self) -> list[str]:
+        """The lines typed since the last call, stripped and lower-cased."""
+        lines = []
+        while not self._lines.empty():
+            lines.append(self._lines.get_nowait())
+        return lines
+
+    def _read(self) -> None:
+        for line in self._stream or sys.stdin:
+            self._lines.put(line.strip().lower())
+
+
+# Typed labels that end an episode; "x" ends it unsaved.
+_TYPED_LABELS = {"s": True, "f": False}
+
+
+class KeyboardEpisodeControlEnvironment(_environment.Environment):
+    """Collection without takeover: Enter starts each episode, a typed ``s`` / ``f`` / ``x`` ends it.
+
+    The policy drives every step, so this also runs with RTC. ``s`` labels the episode a success,
+    ``f`` a failure, ``x`` drops it; each is followed by Enter. As with the Pico4 buttons, the
+    step on which the line is read is the episode's last recorded frame.
+    """
+
+    def __init__(
+        self,
+        wrapped_env: _environment.Environment,
+        lines: TerminalLines,
+        on_label: Callable[[bool], None],
+    ) -> None:
+        self._wrapped_env = wrapped_env
+        self._lines = lines
+        self._on_label = on_label
+        self._awaiting_start = False
+        self._ended = False
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        """Give up waiting for Enter (Ctrl+C). A running episode is ended by the runtime itself."""
+        self._stop_requested = True
+
+    @override
+    def reset(self) -> None:
+        self._wrapped_env.reset()
+        # Wait in the next get_observation: the runtime also resets after the last episode.
+        self._awaiting_start = True
+        self._ended = False
+
+    @override
+    def is_episode_complete(self) -> bool:
+        return self._ended or self._wrapped_env.is_episode_complete()
+
+    @override
+    def get_observation(self) -> dict:
+        if self._awaiting_start:
+            self._wait_for_start()
+            self._awaiting_start = False
+        for line in self._lines.take():
+            self._end_episode(line)
+        return self._wrapped_env.get_observation()
+
+    @override
+    def apply_action(self, action: dict) -> None:
+        self._wrapped_env.apply_action(action)
+
+    def disconnect(self) -> None:
+        self._wrapped_env.disconnect()  # pyright: ignore[reportAttributeAccessIssue]
+
+    def _wait_for_start(self) -> None:
+        # Lines typed while the arms homed are stale: they must not start or label the next episode.
+        stale = self._lines.take()
+        if stale:
+            logger.info(f"Ignoring input typed before the arms homed: {stale}")
+        logger.info("Arms homed. Reset the scene, then press Enter to start the episode.")
+        while True:
+            if self._stop_requested:
+                raise KeyboardInterrupt
+            lines = self._lines.take()
+            if "" in lines:
+                logger.info("Episode started. Type s (success), f (failure) or x (unsaved), then Enter.")
+                return
+            if lines:
+                logger.info(f"Waiting for an empty Enter to start; ignored {lines}")
+            time.sleep(_GATE_POLL_S)
+
+    def _end_episode(self, line: str) -> None:
+        if self._ended:
+            return
+        if line in _TYPED_LABELS:
+            self._ended = True
+            success = _TYPED_LABELS[line]
+            self._on_label(success)
+            logger.info(f"Typed {line}: episode ends as a {'success' if success else 'failure'}.")
+        elif line == "x":
+            self._ended = True
+            logger.info("Typed x: episode ends unsaved.")
+        else:
+            logger.info(f"Ignored input {line!r}; type s, f or x, then Enter.")
+
+
 def stop_on_sigint(
     runtime: Any,
-    episode_control: EpisodeControlEnvironment | None = None,
+    episode_control: EpisodeControlEnvironment | KeyboardEpisodeControlEnvironment | None = None,
     recorder: Any = None,
     force_exit: Callable[[int], Any] = os._exit,
 ) -> Callable[[int, Any], None]:
@@ -154,8 +272,8 @@ def stop_on_sigint(
 
     Args:
         runtime: The runtime to stop.
-        episode_control: Collection mode's episode control, which waits for Pico4 A outside
-            the runtime's reach.
+        episode_control: Collection mode's episode control, which waits for Pico4 A (or Enter)
+            outside the runtime's reach.
         recorder: Collection mode's recorder. The forced exit closes it first: LeRobot writes
             the parquet footers only on ``finalize``, and without them no episode saved in
             this session can be read.

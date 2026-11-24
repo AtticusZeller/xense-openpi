@@ -1,0 +1,25 @@
+# pack-iphone-box rollouts recorded for the value model, with RTC on and nobody taking over.
+#   python -m examples.bi_flexiv_rizon4_rt.main --args.run pack-iphone-box-collect
+#
+# After the arms home, reset the scene and press Enter to start an episode; type s (success),
+# f (failure) or x (unsaved) and Enter to end it. Override --args.record-round for later rounds.
+
+robot_recipe: forward-05-taccap-tilt
+
+# Policy server: xense-infer-03, reached over the wired LAN (enp129s0).
+host: 192.168.200.11
+port: 8000
+
+# Control loop
+runtime_hz: 30.0
+inner_control_hz: 1000
+interpolate_cmds: true
+rtc_enabled: true
+
+# Recording. The task is the demonstrations' (Xense/pack_iphone_box_1119), so the rollouts merge with
+# them; fps follows runtime_hz (30, as in the demonstrations).
+record: true
+record_repo_id: Xense/pack_iphone_box_1119_rollout_r1
+record_round: 1
+task: "Place the paper insert into the box. Place the iPhone into the box with the camera facing up. Close the box lid."
+num_episodes: 50

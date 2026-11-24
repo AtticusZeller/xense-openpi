@@ -155,15 +155,16 @@ class LeRobotRecorderSubscriber(_subscriber.Subscriber):
 class CollectionRecorderSubscriber(LeRobotRecorderSubscriber):
     """Records RECAP rollout episodes: the plain frames plus ``COLLECTION_FEATURES``.
 
-    ``is_intervention`` comes from each step's action dict and ``round`` is constant.
-    ``episode_success`` is only known once the operator labels the episode, so it is
-    written over the whole episode right before saving. An episode that ends without
-    a label is dropped and does not take an episode index.
+    ``is_intervention`` comes from each step's action dict (always False without takeover)
+    and ``round`` is constant. ``episode_success`` is only known once the operator labels
+    the episode, so it is written over the whole episode right before saving. An episode
+    that ends without a label is dropped and does not take an episode index.
     """
 
-    def __init__(self, dataset: LeRobotDataset, task: str, round_index: int):
+    def __init__(self, dataset: LeRobotDataset, task: str, round_index: int, takeover: bool = True):
         super().__init__(dataset, task)
         self._round_index = round_index
+        self._takeover = takeover
         self._success: bool | None = None
 
     def label_episode(self, success: bool) -> None:
@@ -182,7 +183,8 @@ class CollectionRecorderSubscriber(LeRobotRecorderSubscriber):
     @override
     def _build_frame(self, observation: dict, action: dict) -> dict:
         frame = super()._build_frame(observation, action)
-        frame["is_intervention"] = np.array([bool(action["is_intervention"])])
+        # With takeover the key must be there: a missing one would silently record the operator as the policy.
+        frame["is_intervention"] = np.array([bool(action["is_intervention"]) if self._takeover else False])
         frame["round"] = np.array([self._round_index], dtype=np.int64)
         # Placeholder: LeRobot wants every feature on every frame, on_episode_end fills it.
         frame["episode_success"] = np.array([False])
@@ -268,6 +270,7 @@ def make_collection_recorder_subscriber(
     use_videos: bool = True,
     image_writer_threads: int = 4,
     vcodec: str = "h264",
+    takeover: bool = True,
 ) -> CollectionRecorderSubscriber:
     """Create a CollectionRecorderSubscriber for a new RECAP rollout dataset.
 
@@ -284,13 +287,15 @@ def make_collection_recorder_subscriber(
         vcodec: Video codec. LeRobot only merges datasets whose videos share one codec, so this must be
             the codec of the initial demonstrations the rollouts are merged with (h264 for the bi_flexiv
             demonstrations).
+        takeover: Whether an operator can take over. Without takeover the policy drives every frame
+            and ``is_intervention`` is False throughout.
 
     Returns:
         A configured CollectionRecorderSubscriber ready to attach to Runtime.
     """
     features = make_bi_flexiv_dataset_features(image_height, image_width, use_videos) | COLLECTION_FEATURES
     dataset = _create_dataset(repo_id, fps, root, features, use_videos, image_writer_threads, vcodec)
-    return CollectionRecorderSubscriber(dataset=dataset, task=task, round_index=round_index)
+    return CollectionRecorderSubscriber(dataset=dataset, task=task, round_index=round_index, takeover=takeover)
 
 
 def make_recorder_subscriber(

@@ -6,8 +6,10 @@ real LeRobotDataset that the assertions read back.
 """
 
 from collections import deque
+import io
 import logging
 import signal
+import time
 from types import SimpleNamespace
 
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
@@ -20,6 +22,7 @@ if not hasattr(_robot_utils, "get_logger"):
     _robot_utils.get_logger = logging.getLogger
 
 from xense_client import action_chunk_broker
+from xense_client import rtc_action_chunk_broker
 from xense_client.runtime import runtime as _runtime
 from xense_client.runtime.agents import policy_agent as _policy_agent
 
@@ -375,3 +378,98 @@ def test_videos_are_recorded_in_the_codec_of_the_demonstrations(collected):
     cameras = [f"observation.images.{camera}" for camera in _CAMERAS]
     assert collected.dataset.meta.video_keys == cameras
     assert {collected.dataset.meta.features[camera]["info"]["video.codec"] for camera in cameras} == {"h264"}
+
+
+class RTCFakePolicy(FakePolicy):
+    """What RTCActionChunkBroker calls: infer with the RTC prefix arguments."""
+
+    def infer(self, obs, **rtc_kwargs):
+        return super().infer(obs)
+
+
+def _collect_from_terminal(tmp_path, episodes, *, run=True):
+    """Wire terminal-driven collection the way main.py does without --pico4_intervention: RTC, no takeover."""
+    bench = Bench(episodes)
+    lines = SimpleNamespace(take=bench.consume_events)  # The script decides what each read returns.
+    rec = _recorder.make_collection_recorder_subscriber(
+        repo_id="test/collection",
+        task="stack the cylinders",
+        round_index=ROUND,
+        root=tmp_path / "dataset",
+        image_height=48,
+        image_width=64,
+        takeover=False,
+    )
+    environment = collection.KeyboardEpisodeControlEnvironment(bench, lines, on_label=rec.label_episode)
+    broker = rtc_action_chunk_broker.RTCActionChunkBroker(
+        policy=RTCFakePolicy(), frequency_hz=200.0, action_queue_size_to_get_new_actions=2, execution_horizon=5
+    )
+    runtime = _runtime.Runtime(
+        environment=environment,
+        agent=_policy_agent.PolicyAgent(policy=broker),
+        subscribers=[rec],
+        max_hz=200.0,
+        num_episodes=len(episodes),
+        max_episode_steps=STEP_LIMIT,
+    )
+    if run:
+        try:
+            runtime.run()
+        finally:
+            broker.stop()
+            rec.finalize()
+    return SimpleNamespace(bench=bench, runtime=runtime, environment=environment, recorder=rec, broker=broker)
+
+
+TERMINAL_SCRIPT = [
+    # A label typed while the arms homed neither starts nor labels the episode; only an empty line starts it.
+    Episode(press={6: "s"}, stale=["s"], gate=["f", ""]),
+    Episode(press={3: "x"}, gate=[""]),
+    Episode(press={2: "hello", 5: "f"}, gate=[""]),  # input that is not a label is ignored
+    Episode(gate=[""]),  # runs into the step limit
+]
+
+
+def test_terminal_collection_with_rtc_saves_the_labeled_episodes(tmp_path):
+    run = _collect_from_terminal(tmp_path, TERMINAL_SCRIPT)
+    _, episodes = _read(tmp_path / "dataset")
+    assert [len(episode["frame_index"]) for episode in episodes] == [7, 6]
+    assert [len(actions) for actions in run.bench.applied[:4]] == [7, 4, 6, STEP_LIMIT + 1]
+    for episode, success, index in zip(episodes, [True, False], [0, 2], strict=True):
+        assert episode["episode_success"].tolist() == [success] * len(episode["frame_index"])
+        assert not episode["is_intervention"].any()
+        assert set(episode["round"].tolist()) == {ROUND}
+        # The RTC broker's actions are what the robot executed and what was recorded.
+        np.testing.assert_array_equal(episode["action"], np.stack(run.bench.applied[index]))
+
+
+def test_terminal_lines_are_stripped_and_lower_cased():
+    lines = collection.TerminalLines(io.StringIO("\n S \nf\n")).start()
+    taken = []
+    for _ in range(100):
+        taken += lines.take()
+        if len(taken) == 3:
+            break
+        time.sleep(0.01)
+    assert taken == ["", "s", "f"]
+
+
+def test_terminal_stop_request_at_the_gate_raises_instead_of_starting_the_episode(tmp_path):
+    run = _collect_from_terminal(tmp_path, [Episode(gate=[])], run=False)
+    run.environment.request_stop()
+    with pytest.raises(KeyboardInterrupt):
+        run.runtime.run()
+    run.broker.stop()
+    run.recorder.finalize()
+    assert run.bench.applied == [[]]
+
+
+def test_takeover_recorder_still_requires_the_intervention_flag(tmp_path):
+    # Only takeover=False may record False without the agent having said so.
+    rec = _recorder.make_collection_recorder_subscriber(
+        repo_id="test/collection", task="t", round_index=ROUND, root=tmp_path / "d", image_height=48, image_width=64
+    )
+    obs = Bench([]).get_observation()
+    with pytest.raises(KeyError):
+        rec.on_step(obs, {"actions": np.zeros(20, dtype=np.float32)})
+    rec.finalize()
