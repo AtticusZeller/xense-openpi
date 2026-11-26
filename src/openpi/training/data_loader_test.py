@@ -6,13 +6,49 @@ import unittest.mock
 
 import jax
 import lerobot.datasets.lerobot_dataset as lerobot_dataset
+import numpy as np
 import pytest
 import torch
 
 from openpi.models import pi0_config
+from openpi.models import tokenizer as _tokenizer
 from openpi.training import config as _config
 from openpi.training import data_loader as _data_loader
 import openpi.transforms as _transforms
+
+
+@pytest.mark.parametrize("batched", [False, True])
+def test_training_state_dropout_draws_per_sample(batched, monkeypatch):
+    prompt = "Pick up the box"
+    state = np.array([0.0, 0.5])
+    tokenizer = _tokenizer.PaligemmaTokenizer()
+    config = _config.DataConfig(
+        state_dropout_prob=0.25,
+        model_transforms=_transforms.Group(inputs=[_transforms.TokenizePrompt(tokenizer, discrete_state_input=True)]),
+    )
+    samples = [{"prompt": prompt, "state": state} for _ in range(2)]
+    draws = iter([0.1, 0.9])
+    monkeypatch.setattr(np.random, "random", lambda: next(draws))
+
+    if batched:
+        batch = jax.tree.map(lambda *xs: np.stack(xs), *samples)
+        dataset = _data_loader.transform_iterable_dataset([batch], config, skip_norm_stats=True, is_batched=True)
+        batch = next(iter(dataset))
+    else:
+        dataset = _data_loader.transform_dataset(samples, config, skip_norm_stats=True)
+        batch = _data_loader._collate_fn([dataset[0], dataset[1]])
+
+    assert "state_mask" not in batch
+    np.testing.assert_array_equal(batch["state"], np.stack([state, state]))
+    np.testing.assert_array_equal(batch["tokenized_prompt"][0], tokenizer.tokenize(prompt)[0])
+    np.testing.assert_array_equal(batch["tokenized_prompt"][1], tokenizer.tokenize(prompt, state)[0])
+
+
+def test_training_state_dropout_rejects_non_discrete_tokenizer():
+    model_transforms = _config.ModelTransformFactory()(pi0_config.Pi0Config(pi05=True, discrete_state_input=False))
+    config = _config.DataConfig(state_dropout_prob=0.25, model_transforms=model_transforms)
+    with pytest.raises(ValueError, match="discrete_state_input enabled"):
+        _data_loader.transform_dataset([], config, skip_norm_stats=True)
 
 
 def test_torch_data_loader():

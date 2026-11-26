@@ -88,6 +88,9 @@ data:
     # dataset_root: /path/to/dataset # explicit local tree (fallback: $OPENPI_LEROBOT_DATASET_ROOT);
     #                                #   used by both training and compute_norm_stats
     # video_backend: pyav           # optional decoder override (default: LeRobot chooses)
+    # Set to 0.25 to omit state tokens from 25% of training samples.
+    # Requires π0.5 with discrete_state_input; training only.
+    state_dropout_prob: 0.0
     # use_quantile_norm: false       # auto-true for non-pi0 models; rarely override
     # action_sequence_keys: [actions]
     # rlds_data_dir: null            # only relevant for RLDS path

@@ -78,6 +78,29 @@ def test_tokenize_prompt():
     assert np.allclose(tok_mask, data["tokenized_prompt_mask"])
 
 
+@pytest.mark.parametrize("probability", [-0.01, 1.01, float("nan")])
+def test_state_dropout_rejects_invalid_probability(probability):
+    with pytest.raises(ValueError, match="probability must be between 0 and 1"):
+        _transforms.StateDropout(probability)
+
+
+@pytest.mark.parametrize(("probability", "keep_state"), [(0.0, True), (1.0, False)])
+def test_state_dropout_tokenize_prompt(probability, keep_state):
+    prompt = "Pick up the box"
+    state = np.array([0.0, 0.5])
+    tokenizer = _tokenizer.PaligemmaTokenizer()
+    data = _transforms.StateDropout(probability)({"prompt": prompt, "state": state})
+    assert data["state_mask"] is keep_state
+
+    data = _transforms.TokenizePrompt(tokenizer, discrete_state_input=True)(data)
+
+    tokens, mask = tokenizer.tokenize(prompt, state if keep_state else None)
+    np.testing.assert_array_equal(data["tokenized_prompt"], tokens)
+    np.testing.assert_array_equal(data["tokenized_prompt_mask"], mask)
+    np.testing.assert_array_equal(data["state"], state)
+    assert "state_mask" not in data
+
+
 def test_tokenize_no_prompt():
     transform = _transforms.TokenizePrompt(_tokenizer.PaligemmaTokenizer())
 

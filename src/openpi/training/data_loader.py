@@ -335,6 +335,18 @@ def create_rlds_dataset(
     )
 
 
+def _training_model_transforms(data_config: _config.DataConfig) -> Sequence[_transforms.DataTransformFn]:
+    inputs = data_config.model_transforms.inputs
+    if data_config.state_dropout_prob == 0.0:
+        return inputs
+
+    dropout = _transforms.StateDropout(data_config.state_dropout_prob)
+    for index, transform in enumerate(inputs):
+        if isinstance(transform, _transforms.TokenizePrompt) and transform.discrete_state_input:
+            return (*inputs[:index], dropout, *inputs[index:])
+    raise ValueError("State dropout requires TokenizePrompt with discrete_state_input enabled.")
+
+
 def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
     """Transform the dataset by applying the data transforms."""
     norm_stats = {}
@@ -352,7 +364,7 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
             *data_config.repack_transforms.inputs,
             *data_config.data_transforms.inputs,
             _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-            *data_config.model_transforms.inputs,
+            *_training_model_transforms(data_config),
         ],
     )
 
@@ -380,7 +392,7 @@ def transform_iterable_dataset(
             *data_config.repack_transforms.inputs,
             *data_config.data_transforms.inputs,
             _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-            *data_config.model_transforms.inputs,
+            *_training_model_transforms(data_config),
         ],
         is_batched=is_batched,
     )
